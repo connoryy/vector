@@ -1,6 +1,27 @@
 package metadata
 
-generated: components: sources: kubernetes_logs: configuration: {
+base: components: sources: kubernetes_logs: configuration: {
+	acknowledgements: {
+		deprecated: true
+		description: """
+			Controls how acknowledgements are handled by this source.
+
+			This setting is **deprecated** in favor of enabling `acknowledgements` at the [global][global_acks] or sink level.
+
+			Enabling or disabling acknowledgements at the source level has **no effect** on acknowledgement behavior.
+
+			See [End-to-end Acknowledgements][e2e_acks] for more information on how event acknowledgement is handled.
+
+			[global_acks]: https://vector.dev/docs/reference/configuration/global-options/#acknowledgements
+			[e2e_acks]: https://vector.dev/docs/about/under-the-hood/architecture/end-to-end-acknowledgements/
+			"""
+		required: false
+		type: object: options: enabled: {
+			description: "Whether or not end-to-end acknowledgements are enabled for this source."
+			required:    false
+			type: bool: {}
+		}
+	}
 	auto_partial_merge: {
 		description: """
 			Whether or not to automatically merge partial events.
@@ -154,17 +175,6 @@ generated: components: sources: kubernetes_logs: configuration: {
 		required: false
 		type: string: examples: [".ingest_timestamp", "ingest_ts"]
 	}
-	insert_namespace_fields: {
-		description: """
-			Specifies whether or not to enrich logs with namespace fields.
-
-			Setting to `false` prevents Vector from pulling in namespaces and thus namespace label fields will not
-			be available. This helps reduce load on the `kube-apiserver` and lowers daemonset memory usage in clusters
-			with many namespaces.
-			"""
-		required: false
-		type: bool: default: true
-	}
 	internal_metrics: {
 		description: "Configuration of internal metrics for file-based components."
 		required:    false
@@ -201,19 +211,6 @@ generated: components: sources: kubernetes_logs: configuration: {
 			default: 32768
 			unit:    "bytes"
 		}
-	}
-	max_merged_line_bytes: {
-		description: """
-			The maximum number of bytes a line can contain - after merging - before being discarded.
-
-			This protects against malformed lines or tailing incorrect files.
-
-			Note that, if auto_partial_merge is false, this config will be ignored. Also, if max_line_bytes is too small to reach the continuation character, then this
-			config will have no practical impact (the same is true of `auto_partial_merge`). Finally, the smaller of `max_merged_line_bytes` and `max_line_bytes` will apply
-			if auto_partial_merge is true, so if this is set to be 1 MiB, for example, but `max_line_bytes` is set to ~2.5 MiB, then every line greater than 1 MiB will be dropped.
-			"""
-		required: false
-		type: uint: unit: "bytes"
 	}
 	max_read_bytes: {
 		description: """
