@@ -64,3 +64,5 @@ volumes/
 
 # LLM tools
 copilot-instructions.md
+profiling/output/
+profiling/corp-ca-bundle.pem

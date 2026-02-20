@@ -1,0 +1,20 @@
+services:
+  profiling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true  # required for perf
+    volumes:
+      - ..:/vector                                 # vector source
+      - cargo-registry:/usr/local/cargo/registry   # cache cargo downloads
+      - cargo-git:/usr/local/cargo/git
+      - vector-target:/vector/target               # cache build artifacts
+      - .:/profiling                                # config, generator.yaml, output, etc.
+    command: /profiling/profile.sh
+    environment:
+      - PROFILE_DURATION=${PROFILE_DURATION:-60}   # seconds to profile (default 60)
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  vector-target:
