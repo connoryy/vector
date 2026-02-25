@@ -2,6 +2,7 @@ FROM rust:bookworm
 
 # System deps: vector build tools + perf + openssl + python3-yaml for config extraction
 RUN apt-get update && apt-get install -y \
+    bpftrace \
     cmake \
     libssl-dev \
     libsasl2-dev \
@@ -27,6 +28,8 @@ ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
 RUN cargo install inferno
 
 COPY profile.sh /profiling/profile.sh
-RUN chmod +x /profiling/profile.sh
+COPY label-profile.bt /profiling/label-profile.bt
+COPY scripts/ /profiling/scripts/
+RUN chmod +x /profiling/profile.sh /profiling/scripts/*.py
 
 WORKDIR /vector

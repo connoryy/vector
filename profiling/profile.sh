@@ -86,13 +86,20 @@ openssl x509 -req -days 365 \
 echo "  Certificates generated"
 
 # --- Build vector if needed ---
-if [ ! -f "$VECTOR_BIN" ]; then
-    echo "Building vector with debug symbols (this takes a while)..."
+# The binary must be built with frame pointers and the component-probes feature.
+# A stamp file records the flags used; we only rebuild when those change or the
+# binary is missing. This avoids a full rebuild on every profiling run.
+PROFILING_FLAGS="component-probes"
+STAMP_FILE="${VECTOR_BIN}.profiling-stamp"
+
+if [ ! -f "$VECTOR_BIN" ] || [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE")" != "$PROFILING_FLAGS" ]; then
+    echo "Building vector with component-probes feature (this takes a while)..."
     cd /vector
-    cargo build --release 2>&1
+    cargo build --release --features component-probes 2>&1
+    echo "$PROFILING_FLAGS" > "$STAMP_FILE"
     echo "  Build complete"
 else
-    echo "Using existing binary at $VECTOR_BIN"
+    echo "Using existing binary at $VECTOR_BIN (built with profiling flags)"
 fi
 
 # --- Start aggregator ---
@@ -103,7 +110,10 @@ ALLOCATION_TRACING=true \
     ALLOCATION_TRACING_REPORTING_INTERVAL_MS=5000 \
     $VECTOR_BIN --config /tmp/vector.yaml &
 VECTOR_PID=$!
-echo "  Vector PID: $VECTOR_PID"
+# bpftrace 'pid' builtin = initial PID-namespace PID (kernel view), not the
+# container-namespace PID from $!.  Read the global PID via NSpid in procfs.
+VECTOR_GLOBAL_PID=$(awk '/^NSpid:/{print $2}' /proc/$VECTOR_PID/status 2>/dev/null || echo "$VECTOR_PID")
+echo "  Vector PID: $VECTOR_PID  (global: $VECTOR_GLOBAL_PID)"
 
 # Wait for API to be ready
 echo "Waiting for vector API..."
@@ -266,10 +276,40 @@ GEN_PID=$!
 # Brief pause so the generator establishes its connection before perf starts
 sleep 2
 
-echo "Recording perf data for ${PROFILE_DURATION}s..."
-perf record -F99 --call-graph dwarf -p $VECTOR_PID \
+echo "Recording perf + bpftrace data for ${PROFILE_DURATION}s..."
+
+# tracefs is required for uprobes but isn't auto-mounted in Docker Desktop.
+mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+
+# Start bpftrace in background to capture component-labeled stacks via uprobes.
+# Substitute the actual binary path into the script (probe path must be literal at bpftrace startup).
+sed "s|VECTOR_BINARY|${VECTOR_BIN}|g; s|TARGET_PID|${VECTOR_GLOBAL_PID}|g" \
+    /profiling/label-profile.bt > /tmp/label-profile-resolved.bt
+bpftrace /tmp/label-profile-resolved.bt \
+    > "$OUTPUT/bpftrace-transitions.txt" 2>&1 &
+BPFTRACE_PID=$!
+
+# Give bpftrace a moment to attach, then print its first output lines so we can
+# catch compilation/attach errors early without waiting the full profile duration.
+sleep 3
+echo "  [bpftrace sanity] first lines of bpftrace-transitions.txt:"
+head -5 "$OUTPUT/bpftrace-transitions.txt" | sed 's/^/    /'
+
+perf record -F99 --call-graph dwarf,32768 -p $VECTOR_PID \
     -o "$OUTPUT/perf.data" \
     -- sleep "$PROFILE_DURATION"
+
+# Signal bpftrace to flush its maps and exit, then wait for it.
+kill -INT $BPFTRACE_PID 2>/dev/null || true
+wait $BPFTRACE_PID 2>/dev/null || true
+
+# Capture container→kernel TID mapping while vector is still alive.
+# bpftrace uses kernel-namespace TIDs; perf script inside the container uses
+# container-namespace TIDs.  NSpid in /proc has format "kernel_tid container_tid"
+# (outermost namespace first per proc(5)), so $NF=container, $2=kernel.
+for f in /proc/"$VECTOR_PID"/task/*/status; do
+    awk '/^NSpid:/ && NF >= 3 { print $NF, $2 }' "$f" 2>/dev/null
+done > "$OUTPUT/tid-mapping.txt"
 
 echo ""
 echo "Component CPU utilization (fraction of time actively processing):"
@@ -297,13 +337,32 @@ sleep 1
 kill $VECTOR_PID 2>/dev/null || true
 wait $VECTOR_PID 2>/dev/null || true
 
-# --- Generate flamegraph ---
-echo "Generating flamegraph..."
+# --- Generate flamegraphs ---
+echo "Generating flamegraphs..."
 cd "$OUTPUT"
+
+# Unlabeled flamegraph (unchanged pipeline — perf → inferno)
 perf script -i perf.data | inferno-collapse-perf > stacks.folded
 inferno-flamegraph stacks.folded > flamegraph.svg
 
+# Labeled flamegraph (bpftrace transitions + perf stacks → timestamp join → inferno)
+if [ -s bpftrace-transitions.txt ]; then
+    python3 /profiling/scripts/collapse-labeled.py \
+        bpftrace-transitions.txt perf.data tid-mapping.txt \
+        > stacks-labeled.folded
+    if [ -s stacks-labeled.folded ]; then
+        inferno-flamegraph stacks-labeled.folded > flamegraph-labeled.svg
+        echo "  Labeled flamegraph: profiling/output/flamegraph-labeled.svg"
+    else
+        echo "  WARNING: labeled stacks empty — check bpftrace-transitions.txt for uprobe errors"
+    fi
+else
+    echo "  WARNING: bpftrace-transitions.txt is empty — check bpftrace errors in output"
+fi
+
 echo ""
 echo "=== Done ==="
-echo "Flamegraph: profiling/output/flamegraph.svg"
-echo "Raw stacks: profiling/output/stacks.folded"
+echo "Flamegraph:         profiling/output/flamegraph.svg"
+echo "Labeled flamegraph: profiling/output/flamegraph-labeled.svg"
+echo "Raw stacks:         profiling/output/stacks.folded"
+echo "bpftrace output:    profiling/output/bpftrace-transitions.txt"

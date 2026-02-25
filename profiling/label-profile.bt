@@ -1,0 +1,47 @@
+#!/usr/bin/env bpftrace
+//
+// label-profile.bt — component transition logger via uprobes
+//
+// profile.sh substitutes VECTOR_BINARY via sed at runtime.
+//
+// Outputs one line per component enter/exit event to stdout:
+//   E {nsecs} {tid} {component_id}   — entered a component span
+//   X {nsecs} {tid}                  — exited a component span
+//
+// These are consumed by scripts/collapse-labeled.py which joins them with
+// perf stack samples (by tid + timestamp) to produce labeled flamegraphs.
+// This approach works around bpftrace's ustack() failing in Docker Desktop
+// (frame pointer unwinding does not work in the VM's BPF subsystem).
+//
+// TID namespace: perf record inside a Docker container stores container-
+// namespace TIDs; bpftrace's `tid` builtin returns kernel-namespace TIDs.
+//
+// struct pid has a flexible array  struct upid numbers[]  at the end; BTF
+// exposes it as size-0 so bpftrace's type checker rejects numbers[1].
+// We bypass this with pointer arithmetic:
+//   base = (uint64)thread_pid + sizeof(struct pid)   // numbers[] starts here
+//   numbers[1].nr = *(uint32 *)(base + sizeof(struct upid))
+// sizeof(struct pid) == 112 and sizeof(struct upid) == 16 on Linux 6.x ARM64.
+// offsetof() was added in bpftrace 0.18; Debian Bookworm ships 0.16 so we
+// hardcode the offset (112 = sizeof(struct pid), verified at runtime).
+// When level == 0 (no PID namespace isolation) we fall back to tid.
+
+uprobe:VECTOR_BINARY:vector_component_enter {
+    $pid_ptr = curtask->thread_pid;
+    $level   = (uint32)$pid_ptr->level;
+    $base    = (uint64)$pid_ptr + 112;  // sizeof(struct pid); numbers[] starts here
+    $ns_tid  = $level > 0
+               ? *(uint32 *)($base + sizeof(struct upid))
+               : (uint32)tid;
+    printf("E %lld %d %s\n", nsecs, $ns_tid, str(arg0, arg1));
+}
+
+uprobe:VECTOR_BINARY:vector_component_exit {
+    $pid_ptr = curtask->thread_pid;
+    $level   = (uint32)$pid_ptr->level;
+    $base    = (uint64)$pid_ptr + 112;  // sizeof(struct pid); numbers[] starts here
+    $ns_tid  = $level > 0
+               ? *(uint32 *)($base + sizeof(struct upid))
+               : (uint32)tid;
+    printf("X %lld %d\n", nsecs, $ns_tid);
+}
