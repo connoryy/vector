@@ -61,8 +61,11 @@ volumes/
 # Environment variable files (can contain secrets)
 *.env
 .env.*
+profiling/config/*
 
 # LLM tools
 copilot-instructions.md
 profiling/output/
 profiling/corp-ca-bundle.pem
+profiling/test-log-producer-bin/
+
