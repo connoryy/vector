@@ -110,10 +110,7 @@ ALLOCATION_TRACING=true \
     ALLOCATION_TRACING_REPORTING_INTERVAL_MS=5000 \
     $VECTOR_BIN --config /tmp/vector.yaml &
 VECTOR_PID=$!
-# bpftrace 'pid' builtin = initial PID-namespace PID (kernel view), not the
-# container-namespace PID from $!.  Read the global PID via NSpid in procfs.
-VECTOR_GLOBAL_PID=$(awk '/^NSpid:/{print $2}' /proc/$VECTOR_PID/status 2>/dev/null || echo "$VECTOR_PID")
-echo "  Vector PID: $VECTOR_PID  (global: $VECTOR_GLOBAL_PID)"
+echo "  Vector PID: $VECTOR_PID"
 
 # Wait for API to be ready
 echo "Waiting for vector API..."
@@ -283,7 +280,7 @@ mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
 
 # Start bpftrace in background to capture component-labeled stacks via uprobes.
 # Substitute the actual binary path into the script (probe path must be literal at bpftrace startup).
-sed "s|VECTOR_BINARY|${VECTOR_BIN}|g; s|TARGET_PID|${VECTOR_GLOBAL_PID}|g" \
+sed "s|VECTOR_BINARY|${VECTOR_BIN}|g" \
     /profiling/label-profile.bt > /tmp/label-profile-resolved.bt
 bpftrace /tmp/label-profile-resolved.bt \
     > "$OUTPUT/bpftrace-transitions.txt" 2>&1 &

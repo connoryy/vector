@@ -11,7 +11,6 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-yaml \
     perl \
-    socat \
     openssl \
     linux-perf \
     curl \
