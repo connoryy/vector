@@ -86,7 +86,7 @@ openssl x509 -req -days 365 \
 echo "  Certificates generated"
 
 # --- Build vector if needed ---
-# The binary must be built with frame pointers and the component-probes feature.
+# The binary must be built with the component-probes feature.
 # A stamp file records the flags used; we only rebuild when those change or the
 # binary is missing. This avoids a full rebuild on every profiling run.
 PROFILING_FLAGS="component-probes"
