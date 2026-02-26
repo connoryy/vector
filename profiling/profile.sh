@@ -300,13 +300,6 @@ perf record -F99 --call-graph dwarf,32768 -p $VECTOR_PID \
 kill -INT $BPFTRACE_PID 2>/dev/null || true
 wait $BPFTRACE_PID 2>/dev/null || true
 
-# Capture container→kernel TID mapping while vector is still alive.
-# bpftrace uses kernel-namespace TIDs; perf script inside the container uses
-# container-namespace TIDs.  NSpid in /proc has format "kernel_tid container_tid"
-# (outermost namespace first per proc(5)), so $NF=container, $2=kernel.
-for f in /proc/"$VECTOR_PID"/task/*/status; do
-    awk '/^NSpid:/ && NF >= 3 { print $NF, $2 }' "$f" 2>/dev/null
-done > "$OUTPUT/tid-mapping.txt"
 
 echo ""
 echo "Component CPU utilization (fraction of time actively processing):"
@@ -353,7 +346,7 @@ inferno-flamegraph stacks.folded > flamegraph${PROFILE_SUFFIX}.svg
 # Labeled flamegraph (bpftrace transitions + perf stacks → timestamp join → inferno)
 if [ -s bpftrace-transitions.txt ]; then
     python3 /profiling/scripts/collapse-labeled.py \
-        bpftrace-transitions.txt perf-script.txt tid-mapping.txt \
+        bpftrace-transitions.txt perf-script.txt \
         > stacks-labeled.folded
     if [ -s stacks-labeled.folded ]; then
         inferno-flamegraph stacks-labeled.folded > flamegraph-labeled${PROFILE_SUFFIX}.svg

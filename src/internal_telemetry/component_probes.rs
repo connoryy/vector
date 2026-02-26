@@ -4,30 +4,24 @@ use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 /// Fields extracted from a component span and stored in span extensions.
 struct ComponentFields {
     id: String,
-    kind: String,
 }
 
-/// Visitor that extracts `component_id` and `component_kind` from span attributes.
+/// Visitor that extracts `component_id` from span attributes.
 #[derive(Default)]
 struct ComponentFieldVisitor {
     id: Option<String>,
-    kind: Option<String>,
 }
 
 impl tracing::field::Visit for ComponentFieldVisitor {
     fn record_str(&mut self, field: &tracing_core::Field, value: &str) {
-        match field.name() {
-            "component_id" => self.id = Some(value.to_owned()),
-            "component_kind" => self.kind = Some(value.to_owned()),
-            _ => {}
+        if field.name() == "component_id" {
+            self.id = Some(value.to_owned());
         }
     }
 
     fn record_debug(&mut self, field: &tracing_core::Field, value: &dyn std::fmt::Debug) {
-        match field.name() {
-            "component_id" => self.id = Some(format!("{value:?}")),
-            "component_kind" => self.kind = Some(format!("{value:?}")),
-            _ => {}
+        if field.name() == "component_id" {
+            self.id = Some(format!("{value:?}"));
         }
     }
 }
@@ -37,7 +31,6 @@ impl tracing::field::Visit for ComponentFieldVisitor {
 /// bpftrace attaches `uprobe:BINARY:vector_component_enter` here.
 /// Arguments follow the C ABI so bpftrace can read them reliably:
 ///   arg0/arg1 = component_id (ptr, len)
-///   arg2/arg3 = component_kind (ptr, len)
 ///
 /// `black_box` on the arguments creates an opaque side effect that prevents
 /// LTO from proving the function body is empty and eliding the call sites.
@@ -45,13 +38,8 @@ impl tracing::field::Visit for ComponentFieldVisitor {
 /// component span enter.
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn vector_component_enter(
-    id_ptr: *const u8,
-    id_len: usize,
-    kind_ptr: *const u8,
-    kind_len: usize,
-) {
-    std::hint::black_box((id_ptr, id_len, kind_ptr, kind_len));
+pub extern "C" fn vector_component_enter(id_ptr: *const u8, id_len: usize) {
+    std::hint::black_box((id_ptr, id_len));
 }
 
 /// Uprobe attachment point: called on every component span exit.
@@ -91,11 +79,11 @@ where
     ) {
         let mut visitor = ComponentFieldVisitor::default();
         attrs.record(&mut visitor);
-        if let (Some(cid), Some(kind)) = (visitor.id, visitor.kind) {
+        if let Some(cid) = visitor.id {
             if let Some(span_ref) = ctx.span(id) {
                 span_ref
                     .extensions_mut()
-                    .insert(ComponentFields { id: cid, kind });
+                    .insert(ComponentFields { id: cid });
             }
         }
     }
@@ -104,8 +92,7 @@ where
         if let Some(span_ref) = ctx.span(id) {
             if let Some(fields) = span_ref.extensions().get::<ComponentFields>() {
                 let id = fields.id.as_bytes();
-                let kind = fields.kind.as_bytes();
-                vector_component_enter(id.as_ptr(), id.len(), kind.as_ptr(), kind.len());
+                vector_component_enter(id.as_ptr(), id.len());
             }
         }
     }
