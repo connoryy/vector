@@ -87,9 +87,10 @@ def _clean_frame(raw):
     raw = raw.strip()
     if not raw or raw == '[unknown]':
         if dso_m:
-            dso = dso_m.group(1).rsplit('/', 1)[-1]  # basename only
-            return f'[{dso}]'
-        return '[unknown]'
+            dso = dso_m.group(1).rsplit('/', 1)[-1].strip('[]')  # basename, no brackets
+            if dso and dso != 'unknown':
+                return f'[{dso}]'
+        return '[unknown]'  # preserve frame, symbol and DSO both unresolvable
     return raw
 
 
