@@ -14,12 +14,11 @@ Both bpftrace (nsecs builtin = ktime_get_ns) and perf use CLOCK_MONOTONIC from b
 so the timestamps are directly comparable after converting perf's seconds to ns.
 
 Usage:
-    python3 collapse-labeled.py bpftrace-transitions.txt perf.data > stacks-labeled.folded
+    python3 collapse-labeled.py bpftrace-transitions.txt perf-script.txt > stacks-labeled.folded
     inferno-flamegraph stacks-labeled.folded > flamegraph-labeled.svg
 """
 
 import re
-import subprocess
 import sys
 from collections import defaultdict
 
@@ -121,17 +120,15 @@ def _load_tid_mapping(path):
     return mapping
 
 
-def _iter_perf_stacks(perf_data_path, tid_map=None):
+def _iter_perf_stacks(perf_script_path, tid_map=None):
     """
-    Run `perf script -i perf_data_path` and yield (tid, ts_ns, frames) tuples.
+    Read a pre-generated `perf script` text file and yield (tid, ts_ns, frames) tuples.
     frames is ordered outermost → innermost (root to leaf), ready for inferno.
     tid_map translates perf container-namespace TIDs to bpftrace kernel TIDs.
-    """
-    proc = subprocess.Popen(
-        ['perf', 'script', '-i', perf_data_path],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
 
+    Pass a pre-generated text file (not perf.data) so the caller can run
+    `perf script` once and reuse the output for multiple passes.
+    """
     tid = ts_ns = None
     frames = []  # collected innermost-first (perf order); reversed on emit
 
@@ -144,42 +141,41 @@ def _iter_perf_stacks(perf_data_path, tid_map=None):
         ts_ns = new_ts
         frames = []
 
-    for line in proc.stdout:
-        line = line.rstrip('\n')
+    with open(perf_script_path) as fh:
+        for line in fh:
+            line = line.rstrip('\n')
 
-        m = _HEADER_WITH_TID.match(line)
-        if m:
-            yield from _emit_and_reset(int(m.group(2)),
-                                       int(float(m.group(3)) * 1_000_000_000))
-            continue
-
-        m = _HEADER_NO_TID.match(line)
-        if m:
-            yield from _emit_and_reset(int(m.group(1)),
-                                       int(float(m.group(2)) * 1_000_000_000))
-            continue
-
-        # Docker Desktop / some kernels omit [cpu]: "comm  tid  timestamp:  ..."
-        m = _HEADER_NO_CPU.match(line)
-        if m:
-            yield from _emit_and_reset(int(m.group(1)),
-                                       int(float(m.group(2)) * 1_000_000_000))
-            continue
-
-        if tid is not None:
-            m = _FRAME.match(line)
+            m = _HEADER_WITH_TID.match(line)
             if m:
-                frames.append(_clean_frame(m.group(1)))
+                yield from _emit_and_reset(int(m.group(2)),
+                                           int(float(m.group(3)) * 1_000_000_000))
+                continue
+
+            m = _HEADER_NO_TID.match(line)
+            if m:
+                yield from _emit_and_reset(int(m.group(1)),
+                                           int(float(m.group(2)) * 1_000_000_000))
+                continue
+
+            # Docker Desktop / some kernels omit [cpu]: "comm  tid  timestamp:  ..."
+            m = _HEADER_NO_CPU.match(line)
+            if m:
+                yield from _emit_and_reset(int(m.group(1)),
+                                           int(float(m.group(2)) * 1_000_000_000))
+                continue
+
+            if tid is not None:
+                m = _FRAME.match(line)
+                if m:
+                    frames.append(_clean_frame(m.group(1)))
 
     if tid is not None and frames:
         yield tid, ts_ns, list(reversed(frames))
 
-    proc.wait()
-
 
 def main():
     if len(sys.argv) < 3:
-        print('Usage: collapse-labeled.py bpftrace-transitions.txt perf.data [tid-mapping.txt]',
+        print('Usage: collapse-labeled.py bpftrace-transitions.txt perf-script.txt [tid-mapping.txt]',
               file=sys.stderr)
         sys.exit(1)
 
