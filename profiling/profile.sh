@@ -341,18 +341,26 @@ wait $VECTOR_PID 2>/dev/null || true
 echo "Generating flamegraphs..."
 cd "$OUTPUT"
 
+# Suffix output filenames so profile and profile-realistic don't overwrite each other.
+PROFILE_SUFFIX=""
+[ "${USE_TEST_LOG_PRODUCER:-false}" = "true" ] && PROFILE_SUFFIX="-realistic"
+
+# Run perf script once — DWARF offline unwinding is expensive; reuse the output
+# for both the unlabeled and labeled flamegraph passes.
+perf script -i perf.data > perf-script.txt
+
 # Unlabeled flamegraph (unchanged pipeline — perf → inferno)
-perf script -i perf.data | inferno-collapse-perf > stacks.folded
-inferno-flamegraph stacks.folded > flamegraph.svg
+inferno-collapse-perf < perf-script.txt > stacks.folded
+inferno-flamegraph stacks.folded > flamegraph${PROFILE_SUFFIX}.svg
 
 # Labeled flamegraph (bpftrace transitions + perf stacks → timestamp join → inferno)
 if [ -s bpftrace-transitions.txt ]; then
     python3 /profiling/scripts/collapse-labeled.py \
-        bpftrace-transitions.txt perf.data tid-mapping.txt \
+        bpftrace-transitions.txt perf-script.txt tid-mapping.txt \
         > stacks-labeled.folded
     if [ -s stacks-labeled.folded ]; then
-        inferno-flamegraph stacks-labeled.folded > flamegraph-labeled.svg
-        echo "  Labeled flamegraph: profiling/output/flamegraph-labeled.svg"
+        inferno-flamegraph stacks-labeled.folded > flamegraph-labeled${PROFILE_SUFFIX}.svg
+        echo "  Labeled flamegraph: profiling/output/flamegraph-labeled${PROFILE_SUFFIX}.svg"
     else
         echo "  WARNING: labeled stacks empty — check bpftrace-transitions.txt for uprobe errors"
     fi
@@ -362,7 +370,7 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "Flamegraph:         profiling/output/flamegraph.svg"
-echo "Labeled flamegraph: profiling/output/flamegraph-labeled.svg"
+echo "Flamegraph:         profiling/output/flamegraph${PROFILE_SUFFIX}.svg"
+echo "Labeled flamegraph: profiling/output/flamegraph-labeled${PROFILE_SUFFIX}.svg"
 echo "Raw stacks:         profiling/output/stacks.folded"
 echo "bpftrace output:    profiling/output/bpftrace-transitions.txt"
