@@ -72,7 +72,11 @@ where
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         #[cfg(feature = "component-probes")]
         if let Some(span_ref) = ctx.span(&id) {
-            if span_ref.extensions().get::<AllocationGroupToken>().is_some() {
+            if span_ref
+                .extensions()
+                .get::<AllocationGroupToken>()
+                .is_some()
+            {
                 crate::internal_telemetry::component_probes::vector_component_exit();
             }
         }
