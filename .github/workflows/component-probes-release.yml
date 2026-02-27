@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'component-probes-v*'
+    branches:
+      - 'connor/local-vector-profiling'
   workflow_dispatch:
 
 jobs:
@@ -26,6 +28,7 @@ jobs:
         run: tar -czf vector-component-probes-linux-x86_64.tar.gz -C target/release vector
 
       - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: vector-component-probes-linux-x86_64.tar.gz
