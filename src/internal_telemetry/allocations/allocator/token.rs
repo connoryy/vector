@@ -81,10 +81,14 @@ pub struct AllocationGroupToken {
 impl AllocationGroupToken {
     pub fn enter(&self) {
         _ = LOCAL_ALLOCATION_GROUP_STACK.try_with(|stack| stack.borrow_mut().push(self.id));
+        #[cfg(feature = "component-probes")]
+        crate::internal_telemetry::component_probes::vector_component_enter(self.id.as_raw());
     }
 
     pub fn exit(&self) {
         _ = LOCAL_ALLOCATION_GROUP_STACK.try_with(|stack| stack.borrow_mut().pop());
+        #[cfg(feature = "component-probes")]
+        crate::internal_telemetry::component_probes::vector_component_exit();
     }
 }
 
