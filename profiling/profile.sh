@@ -278,6 +278,14 @@ echo "Recording perf + bpftrace data for ${PROFILE_DURATION}s..."
 # tracefs is required for uprobes but isn't auto-mounted in Docker Desktop.
 mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
 
+# Verify sizeof(struct pid) matches the hardcoded offset in label-profile.bt.
+# The flexible array numbers[] starts at offset 112 (sizeof(struct pid) on Linux 6.x ARM64).
+# A mismatch means the TID namespace translation will silently produce wrong TIDs.
+_pid_struct_size=$(bpftrace -e 'BEGIN { printf("%d\n", sizeof(struct pid)); exit(); }' 2>/dev/null | grep -E '^[0-9]+$')
+if [ -n "$_pid_struct_size" ]; then
+    echo "  sizeof(struct pid) = $_pid_struct_size (should be 112)"
+fi
+
 # Start bpftrace in background to capture component-labeled stacks via uprobes.
 # Substitute the actual binary path into the script (probe path must be literal at bpftrace startup).
 sed "s|VECTOR_BINARY|${VECTOR_BIN}|g" \
