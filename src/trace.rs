@@ -90,9 +90,8 @@ pub fn init(color: bool, json: bool, levels: &str, internal_log_rate_limit: u64)
     };
 
     #[cfg(feature = "component-probes")]
-    let subscriber = subscriber.with(
-        crate::internal_telemetry::component_probes::ComponentProbeLayer::new(),
-    );
+    let subscriber =
+        subscriber.with(crate::internal_telemetry::component_probes::ComponentProbeLayer::new());
 
     if json {
         let formatter = tracing_subscriber::fmt::layer().json().flatten_event(true);
