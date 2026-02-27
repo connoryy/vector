@@ -1,7 +1,0 @@
-server:
-  address: ""
-  port: 8080
-  management-port: 8081
-  context-path: /test-log-producer
-  cert-file: /var/conf/server.crt
-  key-file: /var/conf/server.key

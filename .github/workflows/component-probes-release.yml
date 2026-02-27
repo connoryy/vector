@@ -1,0 +1,33 @@
+name: Build and release component-probes binary
+
+on:
+  push:
+    tags:
+      - 'component-probes-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Scope cache to this workflow so it doesn't collide with other builds
+          key: component-probes
+
+      - name: Build component-probes binary
+        run: cargo build --release --features component-probes
+
+      - name: Package binary
+        run: tar -czf vector-component-probes-linux-x86_64.tar.gz -C target/release vector
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: vector-component-probes-linux-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
