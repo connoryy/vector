@@ -88,6 +88,11 @@ impl AllocationGroupToken {
     pub fn exit(&self) {
         _ = LOCAL_ALLOCATION_GROUP_STACK.try_with(|stack| stack.borrow_mut().pop());
     }
+
+    pub fn close(&self) {
+        #[cfg(feature = "component-probes")]
+        crate::internal_telemetry::component_probes::vector_component_exit();
+    }
 }
 
 impl From<AllocationGroupId> for AllocationGroupToken {
