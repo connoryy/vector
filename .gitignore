@@ -37,6 +37,10 @@ sample.log
 # Profiling tools
 heaptrack.*
 massif.*
+profiling/config/*
+profiling/output/
+profiling/corp-ca-bundle.pem
+profiling/test-log-producer-bin/
 
 # Checkpoints
 checkpoints/*
