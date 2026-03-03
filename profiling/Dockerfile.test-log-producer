@@ -1,0 +1,20 @@
+# Runs test-log-producer and redirects its stdout to /logs/sls.log (shared volume).
+#
+# Requires the linux-amd64 binary to be built first:
+#   cd /path/to/test-log-producer && ./godelw build --os-arch linux-amd64
+#   mkdir -p /path/to/vector/profiling/test-log-producer-bin
+#   cp out/build/test-log-producer/linux-amd64/test-log-producer \
+#      /path/to/vector/profiling/test-log-producer-bin/
+#
+# test-log-producer is a static Go binary (CGO_ENABLED=0).
+# witchcraft-go-server detects /.dockerenv and writes all logs to stdout.
+# The CMD redirects that stdout to /logs/sls.log on the shared volume.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/conf \
+    && openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout /var/conf/server.key -out /var/conf/server.crt \
+        -days 3650 -subj "/CN=localhost" 2>/dev/null
+COPY test-log-producer-bin/test-log-producer /usr/bin/test-log-producer
+CMD ["/bin/sh", "-c", "/usr/bin/test-log-producer server --install-config /var/conf/install.yml --runtime-config /var/conf/runtime.yml > /logs/sls.log"]

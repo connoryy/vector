@@ -1,0 +1,29 @@
+# Runtime configuration for test-log-producer in profiling mode.
+# Produces ~1300 events/sec total across three SLS log types:
+#   service.1  (~1000/sec)
+#   audit.2    (~200/sec)
+#   event.2    (~100/sec)
+# No rate-limiter.interval set means rate.Inf — the log-interval is the only throttle.
+# Increase log-interval values to reduce throughput.
+
+service-log-producer:
+  enabled: true
+  log-content: random
+  log-interval: 1ms
+  random-content:
+    log-length: 512
+
+audit-log-producer:
+  enabled: true
+  log-content: random
+  log-interval: 5ms
+  random-content:
+    log-length: 256
+
+event-log-producer:
+  enabled: true
+  log-content: random
+  log-interval: 10ms
+
+non-sls-log-producer:
+  enabled: false

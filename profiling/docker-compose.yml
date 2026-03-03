@@ -1,0 +1,36 @@
+services:
+  profiling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true  # required for perf + bpftrace
+    pid: host         # bpftrace's tid must match Rust's gettid() for VECTOR_COMPONENT_LABELS indexing
+    volumes:
+      - ..:/vector                                 # vector source
+      - cargo-registry:/usr/local/cargo/registry   # cache cargo downloads
+      - cargo-git:/usr/local/cargo/git
+      - vector-target:/vector/target               # cache build artifacts
+      - .:/profiling                                # config, generator.yaml, output, etc.
+      - test-log-producer-logs:/tmp/test-log-producer-logs  # shared with test-log-producer
+    command: /profiling/profile.sh
+    environment:
+      - PROFILE_DURATION=${PROFILE_DURATION:-60}   # seconds to profile (default 60)
+      - USE_TEST_LOG_PRODUCER=${USE_TEST_LOG_PRODUCER:-false}
+
+  # Opt-in via: USE_TEST_LOG_PRODUCER=true docker compose --profile test-log-producer up
+  # Or use the Makefile target: make profile-realistic
+  test-log-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-log-producer
+    profiles: ["test-log-producer"]
+    volumes:
+      - test-log-producer-logs:/logs
+      - ./test-log-producer-install.yml:/var/conf/install.yml
+      - ./test-log-producer-runtime.yml:/var/conf/runtime.yml
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  vector-target:
+  test-log-producer-logs:

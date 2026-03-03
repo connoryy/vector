@@ -95,10 +95,14 @@ impl AllocationGroupToken {
 
     pub fn exit(&self) {
         _ = LOCAL_ALLOCATION_GROUP_STACK.try_with(|stack| stack.borrow_mut().pop());
-        #[cfg(all(target_os = "linux", feature = "component-probes"))]
-        crate::internal_telemetry::component_probes::VECTOR_COMPONENT_LABELS
-            [thread_id() % crate::internal_telemetry::component_probes::LABELS_LEN]
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        // Note: we intentionally do NOT clear VECTOR_COMPONENT_LABELS on exit.
+        // The label persists until the next component's enter() overwrites it.
+        // This is necessary because enter/exit cycles are sub-microsecond
+        // (one per Tokio poll), so a sampling profiler at any reasonable
+        // frequency would never catch a non-zero value if we cleared on exit.
+        // Since Tokio worker threads process one component at a time, the
+        // stale label is correct until the next enter(). Idle time between
+        // polls doesn't matter because perf only samples busy threads.
     }
 }
 
