@@ -89,13 +89,13 @@ echo "  Certificates generated"
 # The binary must be built with the component-probes feature.
 # A stamp file records the flags used; we only rebuild when those change or the
 # binary is missing. This avoids a full rebuild on every profiling run.
-PROFILING_FLAGS="component-probes"
+PROFILING_FLAGS="component-probes,frame-pointers"
 STAMP_FILE="${VECTOR_BIN}.profiling-stamp"
 
 if [ ! -f "$VECTOR_BIN" ] || [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE")" != "$PROFILING_FLAGS" ]; then
     echo "Building vector with component-probes feature (this takes a while)..."
     cd /vector
-    cargo build --release --features component-probes 2>&1
+    RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --features component-probes 2>&1
     echo "$PROFILING_FLAGS" > "$STAMP_FILE"
     echo "  Build complete"
 else
@@ -306,7 +306,7 @@ GEN_PID=$!
 # Brief pause so the generator establishes its connection before perf starts
 sleep 2
 
-perf record -F99 --call-graph dwarf,32768 -p $VECTOR_PID \
+perf record -F99 --call-graph fp -p $VECTOR_PID \
     -o "$OUTPUT/perf.data" \
     -- sleep "$PROFILE_DURATION"
 
@@ -351,8 +351,8 @@ cd "$OUTPUT"
 PROFILE_SUFFIX=""
 [ "${USE_TEST_LOG_PRODUCER:-false}" = "true" ] && PROFILE_SUFFIX="-realistic"
 
-# Run perf script once — DWARF offline unwinding is expensive; reuse the output
-# for both the unlabeled and labeled flamegraph passes.
+# Run perf script once; reuse the output for both the unlabeled and labeled
+# flamegraph passes.
 perf script -i perf.data > perf-script.txt
 
 # Unlabeled flamegraph (unchanged pipeline — perf → inferno)
