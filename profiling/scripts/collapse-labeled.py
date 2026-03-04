@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+collapse-labeled.py — join bpftrace component labels with perf stack samples.
+
+bpftrace's ustack() does not work in Docker Desktop (frame pointer unwinding fails
+in the VM's BPF subsystem).  This script works around it:
+
+  1. bpftrace samples component labels from the shared-memory VECTOR_COMPONENT_LABELS
+     array at 997Hz, emitting "S nsecs tid component" lines.  (Also supports the
+     older E/X transition format from pre-0.49.2 binaries.)
+  2. perf captures user-space stacks (which work via --call-graph dwarf).
+  3. For each perf sample we binary-search the bpftrace log to find the active
+     component for that TID at that timestamp, then prefix the folded stack with it.
+
+Both bpftrace (nsecs builtin = ktime_get_ns) and perf use CLOCK_MONOTONIC from boot,
+so the timestamps are directly comparable after converting perf's seconds to ns.
+
+Usage:
+    python3 collapse-labeled.py bpftrace-transitions.txt perf-script.txt > stacks-labeled.folded
+    inferno-flamegraph stacks-labeled.folded > flamegraph-labeled.svg
+"""
+
+import re
+import sys
+from collections import defaultdict
+
+# perf script header: "comm  PID/TID [cpu]  TIMESTAMP: event:"
+_HEADER_WITH_TID = re.compile(
+    r'^\S.*\s+(\d+)/(\d+)\s+\[.*?\]\s+(\d+\.\d+):'
+)
+# fallback when perf omits the /TID part (older kernels)
+_HEADER_NO_TID = re.compile(
+    r'^\S.*\s+(\d+)\s+\[.*?\]\s+(\d+\.\d+):'
+)
+# Docker Desktop / some kernels omit the [cpu] column entirely:
+#   "vector-worker    38 14186.904001:   10101010 cpu-clock:pppH:"
+_HEADER_NO_CPU = re.compile(
+    r'^\S.*?\s+(\d+)\s+(\d+\.\d+):'
+)
+_FRAME = re.compile(r'^\s+[0-9a-fA-F]+\s+(.*)')
+
+
+def _parse_transitions(path):
+    """
+    Parse the bpftrace label log.
+
+    Supports two formats:
+      S nsecs tid component   — sample from shared-memory labels (>= 0.49.2)
+      E nsecs tid component   — component enter event (legacy uprobes)
+      X nsecs tid             — component exit event (legacy uprobes)
+
+    Returns {tid: [(ns_timestamp, component_id), ...]} sorted by timestamp.
+    component_id == '' marks an exit event (thread left all component spans).
+    """
+    by_tid = defaultdict(list)
+    with open(path) as fh:
+        for line in fh:
+            parts = line.split(None, 3)
+            if not parts:
+                continue
+            try:
+                if parts[0] in ('S', 'E') and len(parts) >= 4:
+                    by_tid[int(parts[2])].append((int(parts[1]), parts[3].strip()))
+                elif parts[0] == 'X' and len(parts) >= 3:
+                    by_tid[int(parts[2])].append((int(parts[1]), ''))
+            except ValueError:
+                pass
+    for events in by_tid.values():
+        events.sort()
+    return by_tid
+
+
+def _find_component(by_tid, tid, ts_ns):
+    """Return the active component for tid at ts_ns ('' if unknown)."""
+    events = by_tid.get(tid)
+    if not events:
+        return ''
+    lo, hi = 0, len(events)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if events[mid][0] <= ts_ns:
+            lo = mid + 1
+        else:
+            hi = mid
+    return events[lo - 1][1] if lo > 0 else ''
+
+
+def _clean_frame(raw):
+    """Strip perf's leading address and trailing dso/offset annotation."""
+    raw = raw.strip()
+    dso_m = re.search(r'\s+\(([^)]+)\)\s*$', raw)   # capture dso before removing
+    raw = re.sub(r'\s+\([^)]*\)\s*$', '', raw)       # remove " (dso)"
+    raw = re.sub(r'\+0x[0-9a-fA-F]+$', '', raw)      # remove "+0x…" offset
+    raw = raw.strip()
+    if not raw or raw == '[unknown]':
+        if dso_m:
+            dso = dso_m.group(1).rsplit('/', 1)[-1].strip('[]')  # basename, no brackets
+            if dso and dso != 'unknown':
+                return f'[{dso}]'
+        return '[unknown]'  # preserve frame, symbol and DSO both unresolvable
+    return raw
+
+
+def _iter_perf_stacks(perf_script_path):
+    """
+    Read a pre-generated `perf script` text file and yield (tid, ts_ns, frames) tuples.
+    frames is ordered outermost → innermost (root to leaf), ready for inferno.
+
+    Pass a pre-generated text file (not perf.data) so the caller can run
+    `perf script` once and reuse the output for multiple passes.
+    """
+    tid = ts_ns = None
+    frames = []  # collected innermost-first (perf order); reversed on emit
+
+    def _emit_and_reset(raw_tid, new_ts):
+        nonlocal tid, ts_ns, frames
+        if tid is not None and frames:
+            yield tid, ts_ns, list(reversed(frames))
+        tid = raw_tid
+        ts_ns = new_ts
+        frames = []
+
+    with open(perf_script_path) as fh:
+        for line in fh:
+            line = line.rstrip('\n')
+
+            m = _HEADER_WITH_TID.match(line)
+            if m:
+                yield from _emit_and_reset(int(m.group(2)),
+                                           int(float(m.group(3)) * 1_000_000_000))
+                continue
+
+            m = _HEADER_NO_TID.match(line)
+            if m:
+                yield from _emit_and_reset(int(m.group(1)),
+                                           int(float(m.group(2)) * 1_000_000_000))
+                continue
+
+            # Docker Desktop / some kernels omit [cpu]: "comm  tid  timestamp:  ..."
+            m = _HEADER_NO_CPU.match(line)
+            if m:
+                yield from _emit_and_reset(int(m.group(1)),
+                                           int(float(m.group(2)) * 1_000_000_000))
+                continue
+
+            if tid is not None:
+                m = _FRAME.match(line)
+                if m:
+                    frames.append(_clean_frame(m.group(1)))
+
+    if tid is not None and frames:
+        yield tid, ts_ns, list(reversed(frames))
+
+
+def main():
+    if len(sys.argv) < 3:
+        print('Usage: collapse-labeled.py bpftrace-transitions.txt perf-script.txt',
+              file=sys.stderr)
+        sys.exit(1)
+
+    transitions_path, perf_data_path = sys.argv[1], sys.argv[2]
+
+    by_tid = _parse_transitions(transitions_path)
+    n_events = sum(len(v) for v in by_tid.values())
+    print(f'Loaded {n_events} component samples for {len(by_tid)} threads',
+          file=sys.stderr)
+
+    stacks: dict[str, int] = defaultdict(int)
+    total = labeled = 0
+
+    for tid, ts_ns, frames in _iter_perf_stacks(perf_data_path):
+        comp = _find_component(by_tid, tid, ts_ns)
+        root = comp if comp else 'unknown'
+        stacks[root + ';' + ';'.join(frames)] += 1
+        total += 1
+        if comp:
+            labeled += 1
+
+    for stack, count in stacks.items():
+        print(f'{stack} {count}')
+
+    pct = 100 * labeled // max(total, 1)
+    print(f'Wrote {len(stacks)} unique stacks from {total} samples, '
+          f'{labeled} labeled ({pct}%)',
+          file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

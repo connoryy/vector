@@ -1,0 +1,50 @@
+data_dir: /tmp/vector-gen-data
+
+sources:
+  test_log_files:
+    type: file
+    include:
+      - /tmp/test-log-producer-logs/sls.log
+    read_from: beginning
+
+transforms:
+  # Simulate what the daemonset's apollo-k8s-metadata transform adds to events
+  # before forwarding them to the aggregator. The .message field is already a
+  # complete SLS JSON envelope (service.1, audit.2, event.2, etc.) written by
+  # test-log-producer — unlike demo_logs, no re-wrapping is needed here.
+  #
+  # The aggregator's sls-envelopes-unsafe transform reads from .sls.* for
+  # routing/metrics and parses .message for the actual payload. Only
+  # apolloEntityId, product, productVersion are strictly required by the
+  # downstream sls-count-metric and sls-bytes-count-metric transforms; the rest
+  # are included to match the full daemonset output format.
+  enrich_for_aggregator:
+    type: remap
+    inputs: [test_log_files]
+    source: |-
+      .source_type = "kubernetes_logs"
+      .sls = {
+        "apolloEntityId": "profiling-test",
+        "product": "test-log-producer",
+        "productVersion": "0.0.0",
+        "service": "test-log-producer",
+        "apolloEnvironmentId": "profiling",
+        "deployment": "profiling",
+        "environment": "profiling",
+        "host": "profiling-node.profiling",
+        "nodeId": "default-test-log-producer-local",
+        "stack": "default",
+        "stackId": "default"
+      }
+
+sinks:
+  to_aggregator:
+    type: vector
+    inputs: [enrich_for_aggregator]
+    address: "127.0.0.1:6000"
+    tls:
+      enabled: true
+      ca_file: /etc/ssl/rubix-ca/ca.pem
+      crt_file: /tmp/profiling-certs/client.crt
+      key_file: /tmp/profiling-certs/client.key
+      verify_hostname: false
