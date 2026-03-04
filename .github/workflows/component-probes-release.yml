@@ -38,6 +38,9 @@ jobs:
 
       - name: Build component-probes binary
         run: cargo build --release --features component-probes
+        env:
+          RUSTFLAGS: "-C force-frame-pointers=yes"
+          CARGO_PROFILE_RELEASE_DEBUG: "true"
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/release vector
