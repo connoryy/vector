@@ -48,15 +48,15 @@ static VECTOR_SOURCE_TYPE_PATH: LazyLock<Option<OwnedTargetPath>> = LazyLock::ne
 });
 
 #[derive(Debug, Deserialize)]
-struct Inner {
+pub(crate) struct Inner {
     #[serde(flatten)]
-    fields: Value,
+    pub(crate) fields: Value,
 
     #[serde(skip)]
-    size_cache: AtomicCell<Option<NonZeroUsize>>,
+    pub(crate) size_cache: AtomicCell<Option<NonZeroUsize>>,
 
     #[serde(skip)]
-    json_encoded_size_cache: AtomicCell<Option<NonZeroJsonSize>>,
+    pub(crate) json_encoded_size_cache: AtomicCell<Option<NonZeroJsonSize>>,
 }
 
 impl Inner {
@@ -282,6 +282,23 @@ impl LogEvent {
             .fields;
         let metadata = self.metadata;
         (value, metadata)
+    }
+
+    /// Convert a `LogEvent` into its raw `Arc<Inner>` and `EventMetadata` without
+    /// triggering `Arc::make_mut` or size cache invalidation.
+    ///
+    /// This is more efficient than `into_parts` when the caller will mutate the
+    /// inner value through `Arc::make_mut` themselves (e.g., `VrlTarget`).
+    #[cfg(feature = "vrl")]
+    pub(crate) fn into_inner_parts(self) -> (Arc<Inner>, EventMetadata) {
+        (self.inner, self.metadata)
+    }
+
+    /// Create a `LogEvent` directly from an `Arc<Inner>` and `EventMetadata`,
+    /// avoiding the `Arc::new` allocation in `from_parts`.
+    #[cfg(feature = "vrl")]
+    pub(crate) fn from_inner(inner: Arc<Inner>, metadata: EventMetadata) -> Self {
+        Self { inner, metadata }
     }
 
     #[must_use]

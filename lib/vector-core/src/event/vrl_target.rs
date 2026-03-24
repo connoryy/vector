@@ -4,6 +4,7 @@ use std::{
     convert::TryFrom,
     marker::PhantomData,
     num::{NonZero, TryFromIntError},
+    sync::Arc,
 };
 
 use lookup::{OwnedTargetPath, OwnedValuePath, PathPrefix, lookup_v2::OwnedSegment};
@@ -14,7 +15,10 @@ use vrl::{
     value::{Kind, ObjectMap, Value},
 };
 
-use super::{Event, EventMetadata, LogEvent, Metric, MetricKind, TraceEvent, metric::TagValue};
+use super::{
+    Event, EventMetadata, LogEvent, Metric, MetricKind, TraceEvent, log_event::Inner,
+    metric::TagValue,
+};
 use crate::{
     config::{LogNamespace, log_schema},
     schema::Definition,
@@ -32,13 +36,19 @@ const VALID_METRIC_PATHS_GET: &str =
 /// fields such as `.tags.host.thing`.
 const MAX_METRIC_PATH_DEPTH: usize = 3;
 
+/// Opaque wrapper around the log event's inner data, used by `VrlTarget`
+/// to hold the `Arc<Inner>` without exposing it as a public type.
+#[derive(Debug, Clone)]
+pub struct LogEventInner(Arc<Inner>);
+
 /// An adapter to turn `Event`s into `vrl_lib::Target`s.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum VrlTarget {
-    // `LogEvent` is essentially just a destructured `event::LogEvent`, but without the semantics
-    // that `fields` must always be a `Map` variant.
-    LogEvent(Value, EventMetadata),
+    // For log events, we hold the Arc<Inner> directly to avoid the cost of
+    // destructuring (into_parts) and reconstructing (from_parts) the LogEvent.
+    // This saves one Arc::new heap allocation per event in the common path.
+    LogEvent(LogEventInner, EventMetadata),
     Metric {
         metric: Metric,
         value: Value,
@@ -103,8 +113,8 @@ impl VrlTarget {
     pub fn new(event: Event, info: &ProgramInfo, multi_value_metric_tags: bool) -> Self {
         match event {
             Event::Log(event) => {
-                let (value, metadata) = event.into_parts();
-                VrlTarget::LogEvent(value, metadata)
+                let (inner, metadata) = event.into_inner_parts();
+                VrlTarget::LogEvent(LogEventInner(inner), metadata)
             }
             Event::Metric(metric) => {
                 // We pre-generate [`Value`] types for the metric fields accessed in
@@ -144,25 +154,36 @@ impl VrlTarget {
     /// array to `.` in VRL.
     pub fn into_events(self, log_namespace: LogNamespace) -> TargetEvents {
         match self {
-            VrlTarget::LogEvent(value, metadata) => match value {
-                value @ Value::Object(_) => {
-                    TargetEvents::One(LogEvent::from_parts(value, metadata).into())
+            VrlTarget::LogEvent(LogEventInner(inner), metadata) => {
+                // Check if the value is an Object (the common case). If so, we can
+                // reconstruct the LogEvent directly from the Arc without allocating.
+                if matches!(inner.fields, Value::Object(_)) {
+                    // Invalidate size caches since VRL may have mutated the fields.
+                    inner.size_cache.store(None);
+                    inner.json_encoded_size_cache.store(None);
+                    return TargetEvents::One(LogEvent::from_inner(inner, metadata).into());
                 }
-
-                Value::Array(values) => TargetEvents::Logs(TargetIter {
-                    iter: values.into_iter(),
-                    metadata,
-                    _marker: PhantomData,
-                    log_namespace,
-                }),
-
-                v => match log_namespace {
-                    LogNamespace::Vector => {
-                        TargetEvents::One(LogEvent::from_parts(v, metadata).into())
-                    }
-                    LogNamespace::Legacy => TargetEvents::One(create_log_event(v, metadata).into()),
-                },
-            },
+                // For non-Object values (Array or scalar), we need to extract the value.
+                // This is the uncommon path (VRL assigned a non-object to root `.`).
+                let value = Arc::try_unwrap(inner)
+                    .map_or_else(|arc| arc.fields.clone(), |inner| inner.fields);
+                match value {
+                    Value::Array(values) => TargetEvents::Logs(TargetIter {
+                        iter: values.into_iter(),
+                        metadata,
+                        _marker: PhantomData,
+                        log_namespace,
+                    }),
+                    v => match log_namespace {
+                        LogNamespace::Vector => {
+                            TargetEvents::One(LogEvent::from_parts(v, metadata).into())
+                        }
+                        LogNamespace::Legacy => {
+                            TargetEvents::One(create_log_event(v, metadata).into())
+                        }
+                    },
+                }
+            }
             VrlTarget::Trace(value, metadata) => match value {
                 value @ Value::Object(_) => {
                     let log = LogEvent::from_parts(value, metadata);
@@ -193,6 +214,32 @@ impl VrlTarget {
         match self {
             VrlTarget::LogEvent(_, metadata) | VrlTarget::Trace(_, metadata) => metadata,
             VrlTarget::Metric { metric, .. } => metric.metadata_mut(),
+        }
+    }
+
+    /// Get a reference to the inner `Value` for log events.
+    /// For `LogEvent`, this accesses the fields through the `Arc` without cloning.
+    fn log_value(&self) -> &Value {
+        match self {
+            VrlTarget::LogEvent(LogEventInner(inner), _) => &inner.fields,
+            VrlTarget::Trace(value, _) => value,
+            _ => unreachable!("log_value called on non-log target"),
+        }
+    }
+
+    /// Get a mutable reference to the inner `Value` for log events.
+    /// For `LogEvent`, this uses `Arc::make_mut` which is free when refcount == 1.
+    fn log_value_mut(&mut self) -> &mut Value {
+        match self {
+            VrlTarget::LogEvent(LogEventInner(inner), _) => {
+                let inner = Arc::make_mut(inner);
+                // Invalidate caches since we're about to mutate
+                inner.size_cache.store(None);
+                inner.json_encoded_size_cache.store(None);
+                &mut inner.fields
+            }
+            VrlTarget::Trace(value, _) => value,
+            _ => unreachable!("log_value_mut called on non-log target"),
         }
     }
 }
@@ -281,8 +328,8 @@ impl Target for VrlTarget {
         let path = &target_path.path;
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    log.insert(path, value);
+                VrlTarget::LogEvent(..) | VrlTarget::Trace(..) => {
+                    self.log_value_mut().insert(path, value);
                     Ok(())
                 }
                 VrlTarget::Metric {
@@ -379,8 +426,8 @@ impl Target for VrlTarget {
     fn target_get(&self, target_path: &OwnedTargetPath) -> Result<Option<&Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.get(&target_path.path))
+                VrlTarget::LogEvent(..) | VrlTarget::Trace(..) => {
+                    Ok(self.log_value().get(&target_path.path))
                 }
                 VrlTarget::Metric { value, .. } => target_get_metric(&target_path.path, value),
             },
@@ -394,8 +441,8 @@ impl Target for VrlTarget {
     ) -> Result<Option<&mut Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.get_mut(&target_path.path))
+                VrlTarget::LogEvent(..) | VrlTarget::Trace(..) => {
+                    Ok(self.log_value_mut().get_mut(&target_path.path))
                 }
                 VrlTarget::Metric { value, .. } => target_get_mut_metric(&target_path.path, value),
             },
@@ -410,8 +457,8 @@ impl Target for VrlTarget {
     ) -> Result<Option<vrl::value::Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.remove(&target_path.path, compact))
+                VrlTarget::LogEvent(..) | VrlTarget::Trace(..) => {
+                    Ok(self.log_value_mut().remove(&target_path.path, compact))
                 }
                 VrlTarget::Metric {
                     metric,
