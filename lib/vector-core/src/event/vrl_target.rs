@@ -36,9 +36,10 @@ const MAX_METRIC_PATH_DEPTH: usize = 3;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum VrlTarget {
-    // `LogEvent` is essentially just a destructured `event::LogEvent`, but without the semantics
-    // that `fields` must always be a `Map` variant.
-    LogEvent(Value, EventMetadata),
+    // Store the `LogEvent` directly to avoid the cost of destructuring (Arc dealloc)
+    // and reconstructing (Arc alloc) on every event through the remap transform.
+    // VRL accesses the value via `LogEvent::value()` / `LogEvent::value_mut()`.
+    LogEvent(LogEvent),
     Metric {
         metric: Metric,
         value: Value,
@@ -102,10 +103,7 @@ impl Iterator for TargetIter<TraceEvent> {
 impl VrlTarget {
     pub fn new(event: Event, info: &ProgramInfo, multi_value_metric_tags: bool) -> Self {
         match event {
-            Event::Log(event) => {
-                let (value, metadata) = event.into_parts();
-                VrlTarget::LogEvent(value, metadata)
-            }
+            Event::Log(log_event) => VrlTarget::LogEvent(log_event),
             Event::Metric(metric) => {
                 // We pre-generate [`Value`] types for the metric fields accessed in
                 // the event. This allows us to then return references to those
@@ -144,25 +142,41 @@ impl VrlTarget {
     /// array to `.` in VRL.
     pub fn into_events(self, log_namespace: LogNamespace) -> TargetEvents {
         match self {
-            VrlTarget::LogEvent(value, metadata) => match value {
-                value @ Value::Object(_) => {
-                    TargetEvents::One(LogEvent::from_parts(value, metadata).into())
-                }
+            VrlTarget::LogEvent(log_event) => {
+                // Check the value type to determine how to handle it.
+                // In the common case (Object), we return the LogEvent directly
+                // without any Arc deallocation/reallocation.
+                let is_array = matches!(log_event.value(), Value::Array(_));
+                let is_object = matches!(log_event.value(), Value::Object(_));
 
-                Value::Array(values) => TargetEvents::Logs(TargetIter {
-                    iter: values.into_iter(),
-                    metadata,
-                    _marker: PhantomData,
-                    log_namespace,
-                }),
-
-                v => match log_namespace {
-                    LogNamespace::Vector => {
-                        TargetEvents::One(LogEvent::from_parts(v, metadata).into())
+                if is_object {
+                    // Common fast path: event value is still an Object, return as-is.
+                    TargetEvents::One(log_event.into())
+                } else if is_array {
+                    // Array case: need to split into multiple events.
+                    let (value, metadata) = log_event.into_parts();
+                    let Value::Array(values) = value else {
+                        unreachable!()
+                    };
+                    TargetEvents::Logs(TargetIter {
+                        iter: values.into_iter(),
+                        metadata,
+                        _marker: PhantomData,
+                        log_namespace,
+                    })
+                } else {
+                    // Scalar case: wrap in message field for Legacy namespace.
+                    let (value, metadata) = log_event.into_parts();
+                    match log_namespace {
+                        LogNamespace::Vector => {
+                            TargetEvents::One(LogEvent::from_parts(value, metadata).into())
+                        }
+                        LogNamespace::Legacy => {
+                            TargetEvents::One(create_log_event(value, metadata).into())
+                        }
                     }
-                    LogNamespace::Legacy => TargetEvents::One(create_log_event(v, metadata).into()),
-                },
-            },
+                }
+            }
             VrlTarget::Trace(value, metadata) => match value {
                 value @ Value::Object(_) => {
                     let log = LogEvent::from_parts(value, metadata);
@@ -184,14 +198,16 @@ impl VrlTarget {
 
     fn metadata(&self) -> &EventMetadata {
         match self {
-            VrlTarget::LogEvent(_, metadata) | VrlTarget::Trace(_, metadata) => metadata,
+            VrlTarget::LogEvent(log_event) => log_event.metadata(),
+            VrlTarget::Trace(_, metadata) => metadata,
             VrlTarget::Metric { metric, .. } => metric.metadata(),
         }
     }
 
     fn metadata_mut(&mut self) -> &mut EventMetadata {
         match self {
-            VrlTarget::LogEvent(_, metadata) | VrlTarget::Trace(_, metadata) => metadata,
+            VrlTarget::LogEvent(log_event) => log_event.metadata_mut(),
+            VrlTarget::Trace(_, metadata) => metadata,
             VrlTarget::Metric { metric, .. } => metric.metadata_mut(),
         }
     }
@@ -281,7 +297,11 @@ impl Target for VrlTarget {
         let path = &target_path.path;
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
+                VrlTarget::LogEvent(log_event) => {
+                    log_event.value_mut().insert(path, value);
+                    Ok(())
+                }
+                VrlTarget::Trace(log, _) => {
                     log.insert(path, value);
                     Ok(())
                 }
@@ -379,9 +399,8 @@ impl Target for VrlTarget {
     fn target_get(&self, target_path: &OwnedTargetPath) -> Result<Option<&Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.get(&target_path.path))
-                }
+                VrlTarget::LogEvent(log_event) => Ok(log_event.value().get(&target_path.path)),
+                VrlTarget::Trace(log, _) => Ok(log.get(&target_path.path)),
                 VrlTarget::Metric { value, .. } => target_get_metric(&target_path.path, value),
             },
             PathPrefix::Metadata => Ok(self.metadata().value().get(&target_path.path)),
@@ -394,9 +413,10 @@ impl Target for VrlTarget {
     ) -> Result<Option<&mut Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.get_mut(&target_path.path))
+                VrlTarget::LogEvent(log_event) => {
+                    Ok(log_event.value_mut().get_mut(&target_path.path))
                 }
+                VrlTarget::Trace(log, _) => Ok(log.get_mut(&target_path.path)),
                 VrlTarget::Metric { value, .. } => target_get_mut_metric(&target_path.path, value),
             },
             PathPrefix::Metadata => Ok(self.metadata_mut().value_mut().get_mut(&target_path.path)),
@@ -410,9 +430,10 @@ impl Target for VrlTarget {
     ) -> Result<Option<vrl::value::Value>, String> {
         match target_path.prefix {
             PathPrefix::Event => match self {
-                VrlTarget::LogEvent(log, _) | VrlTarget::Trace(log, _) => {
-                    Ok(log.remove(&target_path.path, compact))
+                VrlTarget::LogEvent(log_event) => {
+                    Ok(log_event.value_mut().remove(&target_path.path, compact))
                 }
+                VrlTarget::Trace(log, _) => Ok(log.remove(&target_path.path, compact)),
                 VrlTarget::Metric {
                     metric,
                     value,
