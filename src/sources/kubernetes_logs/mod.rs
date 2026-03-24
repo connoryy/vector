@@ -4,7 +4,7 @@
 //! running inside the cluster as a DaemonSet.
 
 #![deny(missing_docs)]
-use std::{path::PathBuf, time::Duration};
+use std::{cmp::min, path::PathBuf, time::Duration};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -14,41 +14,38 @@ use http_1::{HeaderName, HeaderValue};
 use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
 use k8s_paths_provider::K8sPathsProvider;
 use kube::{
+    Client, Config as ClientConfig,
     api::Api,
     config::{self, KubeConfigOptions},
-    runtime::{reflector, watcher, WatchStreamExt},
-    Client, Config as ClientConfig,
+    runtime::{WatchStreamExt, reflector, watcher},
 };
 use lifecycle::Lifecycle;
 use serde_with::serde_as;
 use tokio::sync::oneshot;
-use vector_lib::configurable::configurable_component;
-use vector_lib::file_source::{
-    calculate_ignore_before, Checkpointer, FileServer, FileServerShutdown, FingerprintStrategy,
-    Fingerprinter, Line, ReadFrom, ReadFromConfig,
-};
-use vector_lib::lookup::{lookup_v2::OptionalTargetPath, owned_value_path, path, OwnedTargetPath};
 use vector_lib::{
+    EstimatedJsonEncodedSizeOf, TimeZone,
     codecs::{BytesDeserializer, BytesDeserializerConfig},
+    config::{LegacyKey, LogNamespace},
+    configurable::configurable_component,
     event::{BatchNotifier, BatchStatus},
+    file_source::file_server::{
+        FileServer, Line, Shutdown as FileServerShutdown, calculate_ignore_before,
+    },
+    file_source_common::{
+        Checkpointer, FileFingerprint, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
+    },
     finalizer::OrderedFinalizer,
-};
-use vector_lib::{config::LegacyKey, config::LogNamespace, EstimatedJsonEncodedSizeOf};
-use vector_lib::{
     internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol},
-    TimeZone,
+    lookup::{OwnedTargetPath, lookup_v2::OptionalTargetPath, owned_value_path, path},
 };
-use vrl::value::{kind::Collection, Kind};
+use vrl::value::{Kind, kind::Collection};
 
 use crate::{
+    SourceSender,
     built_info::{PKG_NAME, PKG_VERSION},
-    serde::bool_or_struct,
-    sources::{file::FinalizerEntry, kubernetes_logs::partial_events_merger::merge_partial_events},
-};
-use crate::{
     config::{
-        log_schema, ComponentKey, DataType, GenerateConfig, GlobalOptions,
-        SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
+        ComponentKey, DataType, GenerateConfig, GlobalOptions, SourceAcknowledgementsConfig,
+        SourceConfig, SourceContext, SourceOutput, log_schema,
     },
     event::Event,
     internal_events::{
@@ -58,10 +55,11 @@ use crate::{
         KubernetesLogsPodInfo, StreamClosedError,
     },
     kubernetes::{custom_reflector, meta_cache::MetaCache},
+    serde::bool_or_struct,
     shutdown::ShutdownSignal,
     sources,
+    sources::kubernetes_logs::partial_events_merger::merge_partial_events,
     transforms::{FunctionTransform, OutputBuffer},
-    SourceSender,
 };
 
 mod k8s_paths_provider;
@@ -72,14 +70,22 @@ mod parser;
 mod partial_events_merger;
 mod path_helpers;
 mod pod_metadata_annotator;
+mod test;
 mod transform_utils;
 mod util;
-mod test;
 
-use self::namespace_metadata_annotator::NamespaceMetadataAnnotator;
-use self::node_metadata_annotator::NodeMetadataAnnotator;
-use self::parser::Parser;
-use self::pod_metadata_annotator::PodMetadataAnnotator;
+use self::{
+    namespace_metadata_annotator::NamespaceMetadataAnnotator,
+    node_metadata_annotator::NodeMetadataAnnotator, parser::Parser,
+    pod_metadata_annotator::PodMetadataAnnotator,
+};
+
+/// Entry used by the ordered finalizer to track file positions for acknowledgements.
+#[derive(Debug)]
+struct FinalizerEntry {
+    file_id: FileFingerprint,
+    offset: u64,
+}
 
 /// The `self_node_name` value env var key.
 const SELF_NODE_NAME_ENV_KEY: &str = "VECTOR_SELF_NODE_NAME";
@@ -113,6 +119,15 @@ pub struct Config {
         docs::examples = "my_custom_label!=my_value,my_other_custom_label=my_value"
     ))]
     extra_namespace_label_selector: String,
+
+    /// Specifies whether or not to enrich logs with namespace fields.
+    ///
+    /// Setting to `false` prevents Vector from pulling in namespaces and thus namespace label fields will not
+    /// be available. This helps reduce load on the `kube-apiserver` and lowers daemonset memory usage in clusters
+    /// with many namespaces.
+    ///
+    #[serde(default = "default_insert_namespace_fields")]
+    insert_namespace_fields: bool,
 
     /// The name of the Kubernetes [Node][node] that is running.
     ///
@@ -199,6 +214,16 @@ pub struct Config {
     /// This protects against malformed lines or tailing incorrect files.
     #[configurable(metadata(docs::type_unit = "bytes"))]
     max_line_bytes: usize,
+
+    /// The maximum number of bytes a line can contain - after merging - before being discarded.
+    ///
+    /// This protects against malformed lines or tailing incorrect files.
+    ///
+    /// Note that, if auto_partial_merge is false, this config will be ignored. Also, if max_line_bytes is too small to reach the continuation character, then this
+    /// config will have no practical impact (the same is true of `auto_partial_merge`). Finally, the smaller of `max_merged_line_bytes` and `max_line_bytes` will apply
+    /// if auto_partial_merge is true, so if this is set to be 1 MiB, for example, but `max_line_bytes` is set to ~2.5 MiB, then every line greater than 1 MiB will be dropped.
+    #[configurable(metadata(docs::type_unit = "bytes"))]
+    max_merged_line_bytes: Option<usize>,
 
     /// The number of lines to read for generating the checksum.
     ///
@@ -291,6 +316,7 @@ impl Default for Config {
         Self {
             extra_label_selector: "".to_string(),
             extra_namespace_label_selector: "".to_string(),
+            insert_namespace_fields: true,
             self_node_name: default_self_node_name_env_template(),
             extra_field_selector: "".to_string(),
             auto_partial_merge: true,
@@ -305,6 +331,7 @@ impl Default for Config {
             max_read_bytes: default_max_read_bytes(),
             oldest_first: default_oldest_first(),
             max_line_bytes: default_max_line_bytes(),
+            max_merged_line_bytes: None,
             fingerprint_lines: default_fingerprint_lines(),
             glob_minimum_cooldown_ms: default_glob_minimum_cooldown_ms(),
             ingestion_timestamp_field: None,
@@ -557,6 +584,7 @@ struct Source {
     field_selector: String,
     label_selector: String,
     namespace_label_selector: String,
+    insert_namespace_fields: bool,
     node_selector: String,
     self_node_name: String,
     include_paths: Vec<glob::Pattern>,
@@ -566,6 +594,7 @@ struct Source {
     max_read_bytes: usize,
     oldest_first: bool,
     max_line_bytes: usize,
+    max_merged_line_bytes: Option<usize>,
     fingerprint_lines: usize,
     glob_minimum_cooldown: Duration,
     use_apiserver_cache: bool,
@@ -574,7 +603,7 @@ struct Source {
     include_file_metric_tag: bool,
     rotate_wait: Duration,
     acknowledgements: bool,
-    maybe_logs_dir: Option<String>
+    maybe_logs_dir: Option<String>,
 }
 
 impl Source {
@@ -589,8 +618,7 @@ impl Source {
         {
             std::env::var(SELF_NODE_NAME_ENV_KEY).map_err(|_| {
                 format!(
-                    "self_node_name config value or {} env var is not set",
-                    SELF_NODE_NAME_ENV_KEY
+                    "self_node_name config value or {SELF_NODE_NAME_ENV_KEY} env var is not set"
                 )
             })?
         } else {
@@ -616,7 +644,7 @@ impl Source {
             }
             None => ClientConfig::infer().await?,
         };
-        if let Ok(user_agent) = HeaderValue::from_str(&format!("{}/{}", PKG_NAME, PKG_VERSION)) {
+        if let Ok(user_agent) = HeaderValue::from_str(&format!("{PKG_NAME}/{PKG_VERSION}")) {
             client_config
                 .headers
                 .push((HeaderName::from_static("user-agent"), user_agent));
@@ -648,6 +676,7 @@ impl Source {
             field_selector,
             label_selector,
             namespace_label_selector,
+            insert_namespace_fields: config.insert_namespace_fields,
             node_selector,
             self_node_name,
             include_paths,
@@ -657,6 +686,7 @@ impl Source {
             max_read_bytes: config.max_read_bytes,
             oldest_first: config.oldest_first,
             max_line_bytes: config.max_line_bytes,
+            max_merged_line_bytes: config.max_merged_line_bytes,
             fingerprint_lines: config.fingerprint_lines,
             glob_minimum_cooldown,
             use_apiserver_cache: config.use_apiserver_cache,
@@ -665,11 +695,11 @@ impl Source {
             include_file_metric_tag: config.internal_metrics.include_file_tag,
             rotate_wait: config.rotate_wait,
             acknowledgements,
-            maybe_logs_dir: None
+            maybe_logs_dir: None,
         })
     }
 
-    #[cfg(any(test, feature = "all-integration-tests"))]
+    #[cfg(test)]
     async fn new_test(
         config: &Config,
         globals: &GlobalOptions,
@@ -683,8 +713,7 @@ impl Source {
         {
             std::env::var(SELF_NODE_NAME_ENV_KEY).map_err(|_| {
                 format!(
-                    "self_node_name config value or {} env var is not set",
-                    SELF_NODE_NAME_ENV_KEY
+                    "self_node_name config value or {SELF_NODE_NAME_ENV_KEY} env var is not set"
                 )
             })?
         } else {
@@ -722,6 +751,7 @@ impl Source {
             field_selector,
             label_selector,
             namespace_label_selector,
+            insert_namespace_fields: config.insert_namespace_fields,
             node_selector,
             self_node_name,
             include_paths,
@@ -731,6 +761,7 @@ impl Source {
             max_read_bytes: config.max_read_bytes,
             oldest_first: config.oldest_first,
             max_line_bytes: config.max_line_bytes,
+            max_merged_line_bytes: config.max_merged_line_bytes,
             fingerprint_lines: config.fingerprint_lines,
             glob_minimum_cooldown,
             use_apiserver_cache: config.use_apiserver_cache,
@@ -759,6 +790,7 @@ impl Source {
             field_selector,
             label_selector,
             namespace_label_selector,
+            insert_namespace_fields,
             node_selector,
             self_node_name,
             include_paths,
@@ -768,6 +800,7 @@ impl Source {
             max_read_bytes,
             oldest_first,
             max_line_bytes,
+            max_merged_line_bytes,
             fingerprint_lines,
             glob_minimum_cooldown,
             use_apiserver_cache,
@@ -814,27 +847,28 @@ impl Source {
 
         // -----------------------------------------------------------------
 
-        let namespaces = Api::<Namespace>::all(client.clone());
-        let ns_watcher = watcher(
-            namespaces,
-            watcher::Config {
-                label_selector: Some(namespace_label_selector),
-                list_semantic: list_semantic.clone(),
-                page_size: get_page_size(use_apiserver_cache),
-                ..Default::default()
-            },
-        )
-        .backoff(watcher::DefaultBackoff::default());
         let ns_store_w = reflector::store::Writer::default();
         let ns_state = ns_store_w.as_reader();
-        let ns_cacher = MetaCache::new();
+        if insert_namespace_fields {
+            let namespaces = Api::<Namespace>::all(client.clone());
+            let ns_watcher = watcher(
+                namespaces,
+                watcher::Config {
+                    label_selector: Some(namespace_label_selector),
+                    list_semantic: list_semantic.clone(),
+                    page_size: get_page_size(use_apiserver_cache),
+                    ..Default::default()
+                },
+            )
+            .backoff(watcher::DefaultBackoff::default());
 
-        reflectors.push(tokio::spawn(custom_reflector(
-            ns_store_w,
-            ns_cacher,
-            ns_watcher,
-            delay_deletion,
-        )));
+            reflectors.push(tokio::spawn(custom_reflector(
+                ns_store_w,
+                MetaCache::new(),
+                ns_watcher,
+                delay_deletion,
+            )));
+        }
 
         // -----------------------------------------------------------------
 
@@ -865,6 +899,7 @@ impl Source {
             ns_state.clone(),
             include_paths,
             exclude_paths,
+            insert_namespace_fields,
             maybe_logs_dir,
         );
         let annotator = PodMetadataAnnotator::new(pod_state, pod_fields_spec, log_namespace);
@@ -873,6 +908,14 @@ impl Source {
         let node_annotator = NodeMetadataAnnotator::new(node_state, node_field_spec, log_namespace);
 
         let ignore_before = calculate_ignore_before(ignore_older_secs);
+
+        let mut resolved_max_line_bytes = max_line_bytes;
+        if auto_partial_merge {
+            resolved_max_line_bytes = min(
+                max_line_bytes,
+                max_merged_line_bytes.unwrap_or(max_line_bytes),
+            );
+        }
 
         // TODO: maybe more of the parameters have to be configurable.
 
@@ -898,7 +941,7 @@ impl Source {
             ignore_before,
             // The maximum number of bytes a line can contain before being discarded. This
             // protects against malformed lines or tailing incorrect files.
-            max_line_bytes,
+            max_line_bytes: resolved_max_line_bytes,
             // Delimiter bytes that is used to read the file line-by-line
             line_delimiter: Bytes::from("\n"),
             // The directory where to keep the checkpoints.
@@ -909,16 +952,16 @@ impl Source {
             // The shape of the log files is well-known in the Kubernetes
             // environment, so we pick the a specially crafted fingerprinter
             // for the log files.
-            fingerprinter: Fingerprinter {
-                strategy: FingerprintStrategy::FirstLinesChecksum {
+            fingerprinter: Fingerprinter::new(
+                FingerprintStrategy::FirstLinesChecksum {
                     // Max line length to expect during fingerprinting, see the
                     // explanation above.
                     ignored_header_bytes: 0,
                     lines: fingerprint_lines,
                 },
-                max_line_length: max_line_bytes,
-                ignore_not_found: true,
-            },
+                resolved_max_line_bytes,
+                true,
+            ),
             oldest_first,
             // We do not remove the log files, `kubelet` is responsible for it.
             remove_after: None,
@@ -927,7 +970,6 @@ impl Source {
                 include_file_metric_tag,
             },
             // A handle to the current tokio runtime
-            handle: tokio::runtime::Handle::current(),
             rotate_wait,
         };
 
@@ -967,7 +1009,7 @@ impl Source {
             let byte_size = line.text.len();
             bytes_received.emit(ByteSize(byte_size));
 
-            let mut event = create_event(
+            let mut event: Event = create_event(
                 line.text,
                 &line.filename,
                 ingestion_timestamp_field.as_ref(),
@@ -990,12 +1032,11 @@ impl Source {
             } else {
                 let namespace = file_info.as_ref().map(|info| info.pod_namespace);
 
-                if let Some(name) = namespace {
-                    let ns_info = ns_annotator.annotate(&mut event, name);
-
-                    if ns_info.is_none() {
-                        emit!(KubernetesLogsEventNamespaceAnnotationError { event: &event });
-                    }
+                if insert_namespace_fields
+                    && let Some(name) = namespace
+                    && ns_annotator.annotate(&mut event, name).is_none()
+                {
+                    emit!(KubernetesLogsEventNamespaceAnnotationError { event: &event });
                 }
 
                 let node_info = node_annotator.annotate(&mut event, self_node_name.as_str());
@@ -1030,7 +1071,7 @@ impl Source {
         let (events_count, _) = events.size_hint();
 
         let mut stream = if auto_partial_merge {
-            merge_partial_events(events, log_namespace).left_stream()
+            merge_partial_events(events, log_namespace, max_merged_line_bytes).left_stream()
         } else {
             events.right_stream()
         };
@@ -1164,6 +1205,11 @@ const fn default_oldest_first() -> bool {
     true
 }
 
+// It might make sense to disable this for clusters with a very large number of namespaces.
+const fn default_insert_namespace_fields() -> bool {
+    true
+}
+
 const fn default_max_line_bytes() -> usize {
     // NOTE: The below comment documents an incorrect assumption, see
     // https://github.com/vectordotdev/vector/issues/6967
@@ -1237,7 +1283,7 @@ fn prepare_field_selector(config: &Config, self_node_name: &str) -> crate::Resul
         ?self_node_name
     );
 
-    let field_selector = format!("spec.nodeName={}", self_node_name);
+    let field_selector = format!("spec.nodeName={self_node_name}");
 
     if config.extra_field_selector.is_empty() {
         return Ok(field_selector);
@@ -1251,7 +1297,7 @@ fn prepare_field_selector(config: &Config, self_node_name: &str) -> crate::Resul
 
 // This function constructs the selector for a node to annotate entries with a node metadata.
 fn prepare_node_selector(self_node_name: &str) -> crate::Result<String> {
-    Ok(format!("metadata.name={}", self_node_name))
+    Ok(format!("metadata.name={self_node_name}"))
 }
 
 // This function constructs the effective label selector to use, based on
@@ -1263,5 +1309,5 @@ fn prepare_label_selector(selector: &str) -> String {
         return BUILT_IN.to_string();
     }
 
-    format!("{},{}", BUILT_IN, selector)
+    format!("{BUILT_IN},{selector}")
 }

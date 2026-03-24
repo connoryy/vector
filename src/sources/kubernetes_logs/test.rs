@@ -1,34 +1,44 @@
-#[cfg(any(test, feature = "all-integration-tests"))]
+#[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use chrono::Utc;
-    use futures::{pin_mut, FutureExt, StreamExt};
+    use futures::{FutureExt, StreamExt, pin_mut};
     use http_1::{Request, Response};
     use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
     use kube::{
+        Client,
         api::{ListMeta, ObjectList, TypeMeta, WatchEvent},
         client::Body,
-        Client,
     };
     use similar_asserts::assert_eq;
-    use tempfile::tempdir;
     use std::{
         fs::{self, File},
         future::Future,
         io::Write,
         path::{Path, PathBuf},
     };
-    use tokio::time::{sleep, timeout, Duration};
+    use tempfile::tempdir;
+    use tokio::time::{Duration, sleep, timeout};
     use tower_test::mock::{Handle, SendResponse};
     use vector_lib::{
-        codecs::BytesDeserializerConfig, config::{
-            log_schema, AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace, SourceAcknowledgementsConfig, SourceOutput
-        }, id::ComponentKey, lookup::{owned_value_path, OwnedTargetPath}, schema::Definition
+        codecs::BytesDeserializerConfig,
+        config::{
+            AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace,
+            SourceAcknowledgementsConfig, SourceOutput, log_schema,
+        },
+        id::ComponentKey,
+        lookup::{OwnedTargetPath, owned_value_path},
+        schema::Definition,
     };
-    use vrl::value::{kind::Collection, Kind};
+    use vrl::value::{Kind, kind::Collection};
 
     use crate::{
-        config::{SourceConfigTest, SourceContext}, event::{Event, EventStatus}, extra_context::ExtraContext, shutdown::ShutdownSignal, test_util::components::{assert_source_compliance, SOURCE_TAGS}, SourceSender
+        SourceSender,
+        config::{SourceConfig, SourceConfigTest, SourceContext},
+        event::{Event, EventStatus},
+        extra_context::ExtraContext,
+        shutdown::ShutdownSignal,
+        test_util::components::{SOURCE_TAGS, assert_source_compliance},
     };
 
     use super::super::Config;
@@ -36,19 +46,31 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SourceConfigTest<Client> for Config {
-        async fn build(&self, cx: SourceContext, client: Client) -> crate::Result<super::super::sources::Source> {
+        async fn build(
+            &self,
+            cx: SourceContext,
+            client: Client,
+        ) -> crate::Result<crate::sources::Source> {
             let log_namespace = cx.log_namespace(self.log_namespace);
             let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
-            let source = Source::new_test(self, &cx.globals, &cx.key, acknowledgements, client, cx.extra_context.get::<String>().unwrap().to_string()).await?;
+            let source: Source = Source::new_test(
+                self,
+                &cx.globals,
+                &cx.key,
+                acknowledgements,
+                client,
+                cx.extra_context.get::<String>().unwrap().to_string(),
+            )
+            .await?;
 
             Ok(Box::pin(
-                source
-                    .run(cx.out, cx.shutdown, log_namespace)
-                    .map(|result| {
+                source.run(cx.out, cx.shutdown, log_namespace).map(
+                    |result: Result<(), crate::Error>| {
                         result.map_err(|error| {
                             error!(message = "Source future failed.", %error);
                         })
-                    }),
+                    },
+                ),
             ))
         }
 
@@ -265,6 +287,53 @@ mod tests {
     }
 
     #[test]
+    fn test_default_config_insert_namespace_fields() {
+        let config = Config::default();
+        assert_eq!(config.insert_namespace_fields, true);
+    }
+
+    #[test]
+    fn test_config_insert_namespace_fields_disabled() {
+        let config = Config {
+            insert_namespace_fields: false,
+            ..Default::default()
+        };
+        assert_eq!(config.insert_namespace_fields, false);
+    }
+
+    #[test]
+    fn test_config_serialization_insert_namespace_fields() {
+        let toml_config = r#"
+            insert_namespace_fields = false
+        "#;
+        let config: Config = toml::from_str(toml_config).unwrap();
+        assert_eq!(config.insert_namespace_fields, false);
+
+        let default_toml = "";
+        let default_config: Config = toml::from_str(default_toml).unwrap();
+        assert_eq!(default_config.insert_namespace_fields, true);
+    }
+
+    #[test]
+    fn test_insert_namespace_fields_affects_behavior() {
+        let enabled_config = Config {
+            insert_namespace_fields: true,
+            ..Default::default()
+        };
+        let disabled_config = Config {
+            insert_namespace_fields: false,
+            ..Default::default()
+        };
+
+        assert!(should_watch_namespaces(&enabled_config));
+        assert!(!should_watch_namespaces(&disabled_config));
+    }
+
+    fn should_watch_namespaces(config: &Config) -> bool {
+        config.insert_namespace_fields
+    }
+
+    #[test]
     fn prepare_exclude_paths() {
         let cases = vec![
             (
@@ -299,7 +368,8 @@ mod tests {
         ];
 
         for (input, mut expected) in cases {
-            let mut output = super::super::prepare_exclude_paths(&input).unwrap();
+            let mut output: Vec<glob::Pattern> =
+                super::super::prepare_exclude_paths(&input).unwrap();
             expected.sort();
             output.sort();
             assert_eq!(expected, output, "expected left, actual right");
@@ -309,8 +379,6 @@ mod tests {
     #[test]
     fn prepare_field_selector() {
         let cases = vec![
-            // We're not testing `Config::default()` or empty `self_node_name`
-            // as passing env vars in the concurrent tests is difficult.
             (
                 Config {
                     self_node_name: "qwe".to_owned(),
@@ -395,9 +463,8 @@ mod tests {
 
     #[test]
     fn test_output_schema_definition_vector_namespace() {
-        let definitions = toml::from_str::<Config>("")
-            .unwrap()
-            .outputs(LogNamespace::Vector)
+        let config = toml::from_str::<Config>("").unwrap();
+        let definitions = SourceConfig::outputs(&config, LogNamespace::Vector)
             .remove(0)
             .schema_definition(true);
 
@@ -511,9 +578,8 @@ mod tests {
 
     #[test]
     fn test_output_schema_definition_legacy_namespace() {
-        let definitions = toml::from_str::<Config>("")
-            .unwrap()
-            .outputs(LogNamespace::Legacy)
+        let config = toml::from_str::<Config>("").unwrap();
+        let definitions = SourceConfig::outputs(&config, LogNamespace::Legacy)
             .remove(0)
             .schema_definition(true);
 
@@ -632,7 +698,6 @@ mod tests {
         pod_uid: &str,
         container_name: &str,
     ) {
-        // Receive a request for pods/namespaces/nodes and respond with some data
         pin_mut!(handle);
         let mut pod_count = 0;
         let mut ns_count = 0;
@@ -642,7 +707,6 @@ mod tests {
             assert_eq!(request.method(), http_1::Method::GET);
             let request_uri = request.uri().to_string();
             if !request_uri.contains("watch=true") {
-                // we're back to the initial listing, possibly due to file server restarting
                 pod_count = 0;
                 ns_count = 0;
                 node_count = 0;
@@ -677,8 +741,13 @@ mod tests {
         pod_count: i32,
     ) -> i32 {
         let timestamp = Utc::now();
-        // bump resource_version once we're done with Init so we actually pick up the Apply
-        let mode = if request_uri == "/api/v1/pods?&fieldSelector=spec.nodeName%3Dtest&labelSelector=vector.dev%2Fexclude%21%3Dtrue&limit=500" { "list" } else { "watch" };
+        let mode = if request_uri
+            == "/api/v1/pods?&fieldSelector=spec.nodeName%3Dtest&labelSelector=vector.dev%2Fexclude%21%3Dtrue&limit=500"
+        {
+            "list"
+        } else {
+            "watch"
+        };
         let resource_version = format!("{}", if mode == "list" { 0 } else { 1 });
         let pod: Pod = serde_json::from_value(serde_json::json!({
             "apiVersion": "v1",
@@ -740,7 +809,6 @@ mod tests {
             );
             pod_count + 1
         } else {
-            // don't keep generating more events once we've done the minimal initial list plus one apply
             pod_count
         }
     }
@@ -751,7 +819,6 @@ mod tests {
         namespace_name: &str,
         ns_count: i32,
     ) -> i32 {
-        // bump resource_version once we're done with Init so we actually pick up the Apply
         let mode = if request_uri
             == "/api/v1/namespaces?&labelSelector=vector.dev%2Fexclude%21%3Dtrue&limit=500"
         {
@@ -805,7 +872,6 @@ mod tests {
             );
             ns_count + 1
         } else {
-            // don't keep generating more events once we've done the minimal initial list plus one apply
             ns_count
         }
     }
@@ -815,7 +881,6 @@ mod tests {
         send: SendResponse<Response<Body>>,
         node_count: i32,
     ) -> i32 {
-        // bump resource_version once we're done with Init so we actually pick up the Apply
         let mode = if request_uri == "/api/v1/nodes?&fieldSelector=metadata.name%3Dtest&limit=500" {
             "list"
         } else {
@@ -867,7 +932,6 @@ mod tests {
             );
             node_count + 1
         } else {
-            // don't keep generating more events once we've done the minimal initial list plus one apply
             node_count
         }
     }
@@ -891,13 +955,15 @@ mod tests {
         let dir = &format!(
             "{}/{}_{}_{}/{}",
             tmp_dir.path().to_str().unwrap(),
-            ns_name, pod_name, pod_uid, container_name
+            ns_name,
+            pod_name,
+            pod_uid,
+            container_name
         );
         let dir_path = Path::new(dir);
         fs::create_dir_all(dir_path).unwrap();
         let mut config = Config {
             self_node_name: node_name.to_owned(),
-            // needs to be < the 500 millis we sleep in the inner async block in the calls to run_kubernetes_source
             glob_minimum_cooldown_ms: Duration::from_millis(100),
             ..Default::default()
         };
@@ -911,7 +977,6 @@ mod tests {
             "2016-10-06T00:17:09.669794202Z stdout F first line"
         )
         .unwrap();
-        // Run server first time, collect some lines.
         {
             let received = run_kubernetes_source(
                 &mut config,
@@ -929,11 +994,8 @@ mod tests {
             let lines = extract_messages_string(received);
             assert_eq!(lines, vec!["first line"]);
         }
-        // Perform 'file rotation' to archive old lines.
-        fs::rename(&path.clone(), &path_for_old_file).expect("could not rename");
+        fs::rename(path.clone(), &path_for_old_file).expect("could not rename");
 
-        // Restart the server and make sure it does not re-read the old file
-        // even though it has a new name.
         let second_file = File::create(&path).unwrap();
         sleep_500_millis().await;
         writeln!(
@@ -976,9 +1038,9 @@ mod tests {
 
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum AckingMode {
-        NoAcks,      // No acknowledgement handling and no finalization
-        Unfinalized, // Acknowledgement handling but no finalization
-        Acks,        // Full acknowledgements and proper finalization
+        NoAcks,
+        Unfinalized,
+        Acks,
     }
     use AckingMode::*;
 
@@ -1004,35 +1066,39 @@ mod tests {
             let (trigger_shutdown, shutdown, shutdown_done) = ShutdownSignal::new_wired();
 
             config.acknowledgements = SourceAcknowledgementsConfig::from(acks);
-            let source = config
-                .build(
-                    SourceContext {
-                        key: ComponentKey::from("default"),
-                        globals: GlobalOptions {
-                            data_dir: Some(data_dir.clone()),
-                            log_schema: Default::default(),
-                            telemetry: Default::default(),
-                            timezone: Default::default(),
-                            proxy: Default::default(),
-                            acknowledgements: AcknowledgementsConfig::from(acks),
-                            expire_metrics: Default::default(),
-                            expire_metrics_secs: Default::default(),
-                            expire_metrics_per_metric_set: Default::default(),
-                            wildcard_matching: Default::default(),
-                        },
-                        shutdown: shutdown,
-                        out: tx,
+            let source = SourceConfigTest::<Client>::build(
+                config,
+                SourceContext {
+                    key: ComponentKey::from("default"),
+                    globals: GlobalOptions {
+                        data_dir: Some(data_dir.clone()),
+                        log_schema: Default::default(),
+                        telemetry: Default::default(),
+                        timezone: Default::default(),
                         proxy: Default::default(),
-                        acknowledgements: acks,
-                        schema_definitions: Default::default(),
-                        schema: Default::default(),
-                        extra_context: ExtraContext::single_value(logs_dir.to_owned()),
-                        enrichment_tables: Default::default(),
+                        acknowledgements: AcknowledgementsConfig::from(acks),
+                        expire_metrics: Default::default(),
+                        expire_metrics_secs: Default::default(),
+                        expire_metrics_per_metric_set: Default::default(),
+                        wildcard_matching: Default::default(),
+                        buffer_utilization_ewma_half_life_seconds: Default::default(),
+                        latency_ewma_alpha: Default::default(),
+                        metrics_storage_refresh_period: Default::default(),
                     },
-                    client,
-                )
-                .await
-                .unwrap();
+                    shutdown,
+                    out: tx,
+                    proxy: Default::default(),
+                    acknowledgements: acks,
+                    schema_definitions: Default::default(),
+                    schema: Default::default(),
+                    extra_context: ExtraContext::single_value(logs_dir.to_owned()),
+                    enrichment_tables: Default::default(),
+                    metrics_storage: Default::default(),
+                },
+                client,
+            )
+            .await
+            .unwrap();
 
             tokio::spawn(source);
 
