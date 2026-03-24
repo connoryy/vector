@@ -80,6 +80,27 @@ impl SourceOuter {
     }
 }
 
+/// Generalized interface for describing and building source components in tests.
+#[async_trait]
+#[cfg(any(test, feature = "all-integration-tests"))]
+pub trait SourceConfigTest<Client>:
+    DynClone + NamedComponent + core::fmt::Debug + Send + Sync
+{
+    /// Builds the source with the given context and client.
+    async fn build(&self, cx: SourceContext, client: Client) -> crate::Result<Source>;
+
+    /// Gets the list of outputs exposed by this source.
+    fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput>;
+
+    /// Gets the list of resources, if any, used by this source.
+    fn resources(&self) -> Vec<Resource> {
+        Vec::new()
+    }
+
+    /// Whether or not this source can acknowledge the events it emits.
+    fn can_acknowledge(&self) -> bool;
+}
+
 /// Generalized interface for describing and building source components.
 #[async_trait]
 #[typetag::serde(tag = "type")]
