@@ -274,14 +274,11 @@ impl LogEvent {
     }
 
     /// Convert a `LogEvent` into a tuple of its components
-    pub fn into_parts(mut self) -> (Value, EventMetadata) {
-        self.value_mut();
-
+    pub fn into_parts(self) -> (Value, EventMetadata) {
         let value = Arc::try_unwrap(self.inner)
-            .unwrap_or_else(|_| unreachable!("inner fields already cloned after owning"))
+            .unwrap_or_else(|arc| (*arc).clone())
             .fields;
-        let metadata = self.metadata;
-        (value, metadata)
+        (value, self.metadata)
     }
 
     #[must_use]
