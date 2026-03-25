@@ -147,6 +147,7 @@ impl EventMetadata {
         }
     }
 
+    #[inline]
     fn get_mut(&mut self) -> &mut Inner {
         Arc::make_mut(&mut self.inner)
     }
@@ -156,11 +157,13 @@ impl EventMetadata {
     }
 
     /// Returns a reference to the metadata value
+    #[inline]
     pub fn value(&self) -> &Value {
         &self.inner.value
     }
 
     /// Returns a mutable reference to the metadata value
+    #[inline]
     pub fn value_mut(&mut self) -> &mut Value {
         &mut self.get_mut().value
     }
@@ -424,6 +427,7 @@ impl EventMetadata {
     }
 
     /// Get the schema definition.
+    #[inline]
     pub fn schema_definition(&self) -> &Arc<schema::Definition> {
         &self.inner.schema_definition
     }
