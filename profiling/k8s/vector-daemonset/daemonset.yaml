@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector-daemonset
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: vector-daemonset
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-daemonset
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector-daemonset
+    spec:
+      serviceAccountName: vector-daemonset
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: vector
+          image: vector:profiling
+          imagePullPolicy: Never
+          args:
+            - --config-dir
+            - /etc/vector/
+          env:
+            - name: VECTOR_LOG
+              value: info
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - containerPort: 9598
+              name: metrics
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - SYS_ADMIN
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector/
+              readOnly: true
+            - name: var-log
+              mountPath: /var/log
+              readOnly: true
+            - name: var-lib-docker
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: var-lib-vector
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: vector-daemonset-config
+        - name: var-log
+          hostPath:
+            path: /var/log
+        - name: var-lib-docker
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: var-lib-vector
+          hostPath:
+            path: /var/lib/vector

@@ -1,0 +1,15 @@
+# Large-events runtime config: ~50 events/s, 100KB payloads
+# Tests Vector's handling of oversized log events and memory pressure.
+interval_us: 20000
+message_size_bytes: 102400
+
+log_types:
+  - name: service.1
+    weight: 40
+    message_template: '{"type":"service.1","level":"ERROR","time":"{{timestamp}}","origin":"com.palantir.test.LargeEventGenerator","thread":"main","message":"Large payload with full stack trace and diagnostic context","params":{"requestId":"{{uuid}}","errorCode":"ERR-{{rand_int 1000 9999}}","stackTrace":"java.lang.RuntimeException: Something went wrong\n\tat com.palantir.test.Service.process(Service.java:{{rand_int 10 500}})\n\tat com.palantir.test.Handler.handle(Handler.java:{{rand_int 10 300}})\n\tat com.palantir.test.Server.dispatch(Server.java:{{rand_int 10 200}})\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)\n\tat java.base/java.lang.Thread.run(Thread.java:829)\nCaused by: java.io.IOException: Connection reset\n\tat java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:285)","diagnostics":{"heapUsed":"{{rand_int 100 8000}}MB","activeThreads":{{rand_int 10 500}},"openConnections":{{rand_int 1 1000}},"pendingRequests":{{rand_int 0 5000}}}}}'
+  - name: request.2
+    weight: 30
+    message_template: '{"type":"request.2","time":"{{timestamp}}","method":"POST","path":"/api/v1/bulk-upload","status":{{choice 200 413 500}},"requestSize":{{rand_int 50000 500000}},"responseSize":{{rand_int 1000 200000}},"duration":{{rand_int 1000 30000}},"traceId":"{{hex 16}}","params":{"userId":"user-{{rand_int 1 100}}","uploadId":"upload-{{uuid}}","fileCount":{{rand_int 1 100}},"totalBytes":{{rand_int 100000 10000000}}}}'
+  - name: event.2
+    weight: 30
+    message_template: '{"type":"event.2","time":"{{timestamp}}","eventName":"bulk.data.processed","values":{"recordCount":{{rand_int 1000 100000}},"batchSize":{{rand_int 10000 1000000}},"processingTimeMs":{{rand_int 1000 60000}},"errorCount":{{rand_int 0 100}},"retryCount":{{rand_int 0 10}}}}'

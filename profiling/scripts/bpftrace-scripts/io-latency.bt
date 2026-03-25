@@ -1,0 +1,133 @@
+/*
+ * io-latency.bt -- Trace I/O syscall latency distributions
+ *
+ * Traces the latency of key I/O system calls made by Vector:
+ *   - write() / writev()
+ *   - read() / readv()
+ *   - sendto() / sendmsg()
+ *   - epoll_wait()
+ *
+ * Usage:
+ *   bpftrace io-latency.bt -p $(pgrep vector)
+ *
+ * Or from within the pod:
+ *   bpftrace /path/to/io-latency.bt
+ */
+
+/* write / writev */
+tracepoint:syscalls:sys_enter_write,
+tracepoint:syscalls:sys_enter_writev
+/comm == "vector"/
+{
+    @write_start[tid] = nsecs;
+    @write_bytes[tid] = args.count;
+}
+
+tracepoint:syscalls:sys_exit_write,
+tracepoint:syscalls:sys_exit_writev
+/comm == "vector" && @write_start[tid]/
+{
+    $delta_us = (nsecs - @write_start[tid]) / 1000;
+    @write_latency_us = hist($delta_us);
+    @write_total_bytes = sum(@write_bytes[tid]);
+    @write_count = count();
+    delete(@write_start[tid]);
+    delete(@write_bytes[tid]);
+}
+
+/* read / readv */
+tracepoint:syscalls:sys_enter_read,
+tracepoint:syscalls:sys_enter_readv
+/comm == "vector"/
+{
+    @read_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_read,
+tracepoint:syscalls:sys_exit_readv
+/comm == "vector" && @read_start[tid]/
+{
+    $delta_us = (nsecs - @read_start[tid]) / 1000;
+    @read_latency_us = hist($delta_us);
+    @read_count = count();
+    delete(@read_start[tid]);
+}
+
+/* sendto / sendmsg */
+tracepoint:syscalls:sys_enter_sendto,
+tracepoint:syscalls:sys_enter_sendmsg
+/comm == "vector"/
+{
+    @send_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_sendto,
+tracepoint:syscalls:sys_exit_sendmsg
+/comm == "vector" && @send_start[tid]/
+{
+    $delta_us = (nsecs - @send_start[tid]) / 1000;
+    @send_latency_us = hist($delta_us);
+    @send_count = count();
+    delete(@send_start[tid]);
+}
+
+/* epoll_wait */
+tracepoint:syscalls:sys_enter_epoll_wait,
+tracepoint:syscalls:sys_enter_epoll_pwait
+/comm == "vector"/
+{
+    @epoll_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_epoll_wait,
+tracepoint:syscalls:sys_exit_epoll_pwait
+/comm == "vector" && @epoll_start[tid]/
+{
+    $delta_us = (nsecs - @epoll_start[tid]) / 1000;
+    @epoll_latency_us = hist($delta_us);
+    @epoll_count = count();
+    $n_events = args.ret;
+    if ($n_events > 0) {
+        @epoll_events_ready = hist($n_events);
+    }
+    delete(@epoll_start[tid]);
+}
+
+/* Periodic summary every 10 seconds */
+interval:s:10
+{
+    time("\n--- I/O Latency Snapshot %H:%M:%S ---\n");
+    printf("write calls: "); print(@write_count);
+    printf("read calls: ");  print(@read_count);
+    printf("send calls: ");  print(@send_count);
+    printf("epoll calls: "); print(@epoll_count);
+}
+
+END
+{
+    time("\n=== Final I/O Latency Report %H:%M:%S ===\n");
+
+    printf("\n--- write() Latency (us) ---\n");
+    print(@write_latency_us);
+    printf("Total write calls: "); print(@write_count);
+
+    printf("\n--- read() Latency (us) ---\n");
+    print(@read_latency_us);
+    printf("Total read calls: "); print(@read_count);
+
+    printf("\n--- sendto()/sendmsg() Latency (us) ---\n");
+    print(@send_latency_us);
+    printf("Total send calls: "); print(@send_count);
+
+    printf("\n--- epoll_wait() Latency (us) ---\n");
+    print(@epoll_latency_us);
+    printf("Total epoll calls: "); print(@epoll_count);
+    printf("Events per epoll_wait return:\n");
+    print(@epoll_events_ready);
+
+    /* cleanup */
+    clear(@write_start);  clear(@write_bytes);
+    clear(@read_start);
+    clear(@send_start);
+    clear(@epoll_start);
+}

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: profiling
+  labels:
+    apollo.palantir.com/env-id: profiling-env-001
+    prometheus.io/discover: "true"

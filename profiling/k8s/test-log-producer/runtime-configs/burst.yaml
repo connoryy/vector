@@ -1,0 +1,9 @@
+# Burst runtime config: ~40000 events/s, service.1 only
+# Simulates sudden traffic spikes to test backpressure and buffering.
+interval_us: 25
+message_size_bytes: 512
+
+log_types:
+  - name: service.1
+    weight: 100
+    message_template: '{"type":"service.1","level":"{{choice INFO INFO WARN ERROR}}","time":"{{timestamp}}","origin":"com.palantir.test.BurstGenerator","thread":"burst-pool-{{rand_int 1 128}}-thread-{{rand_int 1 64}}","message":"Burst event generated under spike load","params":{"requestId":"{{uuid}}","burstId":"burst-{{rand_int 1 1000}}","sequenceNum":{{rand_int 1 1000000}},"duration":"{{rand_int 0 10}}ms"}}'

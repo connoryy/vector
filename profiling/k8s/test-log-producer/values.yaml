@@ -1,0 +1,54 @@
+replicaCount: 3
+namespace: profiling
+
+podAnnotations:
+  com.palantir.rubix.pod/sls-service-info-v2: '{"service-name":"test-log-producer","service-id":"com.palantir.test-log-producer","stack-name":"profiling-stack","stack-id":"profiling-stack-001","containers":{"test-log-producer":{"product-name":"test-log-producer","product-version":"1.0.0"}}}'
+  apollo.palantir.com/metadata.entity.id: "test-log-producer-001"
+  apollo.palantir.com/product.name: "test-log-producer"
+  apollo.palantir.com/product.group: "com.palantir.test"
+  apollo.palantir.com/product.version: "1.0.0"
+  apollo.palantir.com/service: "test-log-producer"
+  apollo.palantir.com/serviceId: "com.palantir.test-log-producer"
+  apollo.palantir.com/stack: "profiling-stack"
+  apollo.palantir.com/stackId: "profiling-stack-001"
+
+podLabels:
+  app.kubernetes.io/name: test-log-producer
+  instance: test-log-producer
+  version: "1.0.0"
+  app: test-log-producer
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 15Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+runtimeConfig:
+  log_types:
+    - name: service.1
+      interval_ms: 100
+      message_template: '{"type":"service.1","level":"INFO","time":"{{timestamp}}","origin":"com.palantir.test.LogProducer","thread":"main","message":"Service log entry generated","params":{"requestId":"{{uuid}}","duration":"{{rand_int 1 500}}ms"}}'
+    - name: request.2
+      interval_ms: 200
+      message_template: '{"type":"request.2","time":"{{timestamp}}","method":"GET","path":"/api/v1/data","status":200,"requestSize":0,"responseSize":{{rand_int 100 10000}},"duration":{{rand_int 1 500}},"traceId":"{{hex 16}}","params":{"userId":"user-{{rand_int 1 1000}}"}}'
+    - name: event.2
+      interval_ms: 500
+      message_template: '{"type":"event.2","time":"{{timestamp}}","eventName":"data.processed","values":{"count":{{rand_int 1 100}},"batchSize":{{rand_int 10 1000}}}}'
+    - name: audit.2
+      interval_ms: 1000
+      message_template: '{"type":"audit.2","time":"{{timestamp}}","name":"USER_ACTION","result":"SUCCESS","uid":"user-{{rand_int 1 100}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-001","requestParams":{"action":"read","resource":"/data/{{rand_int 1 1000}}"},"resultParams":{"allowed":true}}'
+    - name: audit.3
+      interval_ms: 1000
+      message_template: '{"type":"audit.3","time":"{{timestamp}}","name":"RESOURCE_ACCESS","result":"SUCCESS","uid":"user-{{rand_int 1 100}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-001","requestParams":{"action":"write","resource":"/data/{{rand_int 1 1000}}"},"resultParams":{"allowed":true},"otherUids":[],"entities":[]}'
+    - name: metric.1
+      interval_ms: 250
+      message_template: '{"type":"metric.1","time":"{{timestamp}}","metricName":"server.request.duration","metricType":"histogram","values":[{"count":{{rand_int 10 1000}},"min":{{rand_int 1 10}},"max":{{rand_int 100 5000}},"p50":{{rand_int 10 100}},"p95":{{rand_int 100 500}},"p99":{{rand_int 500 2000}}}],"tags":{"service":"test-log-producer","endpoint":"/api/v1/data"}}'
+    - name: wrapped.1
+      interval_ms: 500
+      message_template: '{"type":"wrapped.1","time":"{{timestamp}}","entityName":"test-log-producer","entityVersion":"1.0.0","payload":{"type":"serviceLogV1","serviceLogV1":{"type":"service.1","level":"INFO","time":"{{timestamp}}","origin":"com.palantir.test.WrappedProducer","thread":"worker-{{rand_int 1 8}}","message":"Wrapped service log entry"}}}'
+    - name: plaintext
+      interval_ms: 500
+      message_template: '{{timestamp}} INFO [main] com.palantir.test.LogProducer - Processing batch of {{rand_int 1 100}} events in {{rand_int 1 500}}ms'

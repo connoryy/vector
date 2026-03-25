@@ -1,0 +1,25 @@
+# Journald-style runtime config: ~200 events/s, system-level log formats
+# Simulates logs from kubelet, containerd, kernel, chronyd, sudo, and auditd.
+# These represent non-application logs commonly seen in Kubernetes node journals.
+interval_us: 5000
+message_size_bytes: 512
+
+log_types:
+  - name: kubelet
+    weight: 30
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} kubelet[{{rand_int 1000 9999}}]: I{{rand_int 0101 1231}} {{timestamp}} {{rand_int 1 9999}} {{choice kubelet.go pod_workers.go volume_manager.go image_gc_manager.go container_manager.go}}:{{rand_int 100 999}}] {{choice "SyncLoop (PLEG): event for pod" "Container runtime status check completed" "Volume successfully attached for pod" "Image garbage collection freed" "Pod status updated"}} {{choice "profiling/test-log-producer-" "kube-system/coredns-" "kube-system/kube-proxy-" "monitoring/prometheus-"}}{{hex 5}}'
+  - name: containerd
+    weight: 25
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} containerd[{{rand_int 1000 9999}}]: time="{{timestamp}}" level={{choice info info info warning error}} msg="{{choice \"starting container\" \"container exited\" \"pulling image\" \"unpacking layers\" \"snapshot committed\" \"content store write\"}}" id={{hex 16}} namespace=k8s.io'
+  - name: kernel
+    weight: 15
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} kernel: [{{rand_int 10000 9999999}}.{{rand_int 100000 999999}}] {{choice "TCP: request_sock_TCP: Possible SYN flooding on port" "Out of memory: Killed process" "EXT4-fs (sda1): mounted filesystem with ordered data mode" "bridge: filtering via arp/ip/ip6tables is no longer available" "cgroup: memory cgroup out of memory"}} {{choice "" "pid=" "src=" "dst="}}{{rand_int 1 65535}}'
+  - name: chronyd
+    weight: 10
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} chronyd[{{rand_int 100 999}}]: {{choice "System clock was stepped by" "Selected source" "Source" "Frequency" "Can'\''t"}} {{choice "0.000001 seconds" "10.0.0.1 (ntp.internal)" "10.0.0.1 reachable" "-0.234 ppm" "synchronise: no selectable sources"}}'
+  - name: sudo
+    weight: 10
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} sudo[{{rand_int 1000 9999}}]:   {{choice root admin operator}} : TTY={{choice pts/0 pts/1 pts/2 console}} ; PWD={{choice /root /home/admin /var/log}} ; USER=root ; COMMAND={{choice "/bin/systemctl restart kubelet" "/usr/bin/crictl ps" "/bin/journalctl -u containerd" "/usr/bin/kubectl get pods -A" "/bin/cat /var/log/syslog"}}'
+  - name: auditd
+    weight: 10
+    message_template: '{{timestamp}} node-{{rand_int 1 10}} audit[{{rand_int 1 9999}}]: AVC apparmor="{{choice ALLOWED DENIED AUDIT}}" operation="{{choice open read write exec mknod}}" profile="{{choice docker-default cri-containerd.apparmor.d unconfined}}" name="/{{choice proc sys var etc run}}/{{choice net/ipv4 fs/pipe-max-size log/audit lib/containers}}" pid={{rand_int 1 65535}} comm="{{choice runc containerd-shim kubelet node-exporter}}"'

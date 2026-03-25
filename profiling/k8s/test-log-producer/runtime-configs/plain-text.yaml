@@ -1,0 +1,19 @@
+# Plain-text runtime config: ~333 events/s, non-SLS text formats
+# Tests Vector's handling of logs that do not conform to SLS JSON format.
+# Includes Java log4j, Python logging, Go slog, and nginx access log formats.
+interval_us: 3000
+message_size_bytes: 1024
+
+log_types:
+  - name: java-log4j
+    weight: 30
+    message_template: '{{timestamp}} {{choice INFO INFO WARN ERROR DEBUG}} [{{choice main worker-1 worker-2 scheduler http-nio-8080-exec-1 http-nio-8080-exec-2}}] com.palantir.test.{{choice ServiceHandler RequestProcessor DataPipeline CacheManager ConnectionPool}} - {{choice "Request processed successfully in" "Failed to connect to upstream service after" "Cache miss for key, fetching from source took" "Connection pool exhausted, waiting" "Scheduled task completed in"}} {{rand_int 1 5000}}ms [requestId={{uuid}}]'
+  - name: python-logging
+    weight: 20
+    message_template: '{{timestamp}} - {{choice root app.main app.worker app.api celery.task}} - {{choice INFO WARNING ERROR CRITICAL}} - {{choice "Task completed" "Database query slow" "Failed to process message" "Rate limit exceeded" "Memory usage above threshold"}}: {{choice "duration=%.3fs" "query_time=%.2fs" "error_count=%d" "current=%d limit=%d" "heap_mb=%d threshold_mb=%d"}} [pid={{rand_int 1 65535}} tid={{rand_int 1 100}}]'
+  - name: go-slog
+    weight: 20
+    message_template: 'time={{timestamp}} level={{choice INFO WARN ERROR DEBUG}} msg="{{choice \"http request handled\" \"grpc call completed\" \"cache entry expired\" \"config reloaded\" \"health check passed\"}}" component={{choice server handler cache config health}} request_id={{uuid}} duration_ms={{rand_int 1 3000}} status={{choice 200 201 400 404 500}}'
+  - name: nginx-access
+    weight: 30
+    message_template: '10.{{rand_int 0 255}}.{{rand_int 0 255}}.{{rand_int 1 254}} - {{choice user-1 user-2 admin - -}} [{{timestamp}}] "{{choice GET POST PUT DELETE}} /api/v1/{{choice resources users events metrics configs}}/{{rand_int 1 100000}} HTTP/{{choice 1.1 2.0}}" {{choice 200 200 200 201 204 301 400 401 403 404 500 502 503}} {{rand_int 100 500000}} "{{choice https://app.example.com http://internal.service -}}" "{{choice \"Mozilla/5.0\" \"curl/7.88.1\" \"Go-http-client/2.0\" \"python-requests/2.28.0\"}}"'

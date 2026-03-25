@@ -1,0 +1,102 @@
+## ---------------------------------------------------------------------------
+## Stage 1: Build coz causal profiler from source
+## ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS coz-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake g++ libelfin-dev python3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Docker Desktop's SSL interception breaks github.com certs — bypass with GIT_SSL_NO_VERIFY
+RUN GIT_SSL_NO_VERIFY=1 git clone --depth 1 https://github.com/plasma-umass/coz.git /opt/coz && \
+    cd /opt/coz && mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j"$(nproc)" && \
+    make install
+
+## ---------------------------------------------------------------------------
+## Stage 2: Build Vector with debug symbols and selected features
+## ---------------------------------------------------------------------------
+FROM rust:1.79-bookworm AS vector-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake g++ libssl-dev libsasl2-dev pkg-config protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /vector
+
+# Copy manifests first for layer caching
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY lib/ lib/
+COPY src/ src/
+COPY scripts/ scripts/
+COPY benches/ benches/
+COPY tests/ tests/
+
+ARG FEATURES="\
+api,\
+api-client,\
+sources-kubernetes_logs,\
+sources-internal_metrics,\
+sources-journald,\
+sources-file,\
+sources-static_metrics,\
+transforms-remap,\
+transforms-route,\
+transforms-exclusive_route,\
+transforms-filter,\
+transforms-throttle,\
+transforms-log_to_metric,\
+sinks-vector,\
+sinks-aws_s3,\
+sinks-loki,\
+sinks-prometheus,\
+sinks-console,\
+allocation-tracing,\
+tokio-console"
+
+# Build with debug symbols preserved (profile.release has debug=true in Cargo.toml,
+# but we force it via RUSTFLAGS to guarantee symbols are present).
+ENV RUSTFLAGS="-C debuginfo=2"
+
+RUN cargo build --release --no-default-features --features "${FEATURES}"
+
+# Keep the binary with debug info intact, but create a stripped copy for size comparison
+RUN cp target/release/vector /vector-debug && \
+    objcopy --only-keep-debug target/release/vector /vector-debug.sym
+
+## ---------------------------------------------------------------------------
+## Stage 3: Runtime image with profiling & debugging tools
+## ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        linux-perf \
+        bpftrace \
+        strace \
+        iproute2 \
+        gdb \
+        valgrind \
+        python3 \
+        binutils \
+        ca-certificates \
+        curl \
+        procps && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install coz causal profiler (CLI + libcoz.so for LD_PRELOAD)
+COPY --from=coz-builder /usr/local/bin/coz /usr/local/bin/coz
+COPY --from=coz-builder /usr/local/lib/libcoz.so /usr/local/lib/libcoz.so
+
+# Copy Vector binary with debug symbols
+COPY --from=vector-builder /vector-debug /usr/local/bin/vector
+COPY --from=vector-builder /vector-debug.sym /usr/local/share/vector/vector.sym
+
+# jemalloc tuning – background_thread enables async purging, narenas reduces
+# lock contention in highly-threaded workloads.
+ENV MALLOC_CONF="background_thread:true,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:15000"
+
+# Ensure the dynamic linker can find coz's shared library
+RUN ldconfig
+
+ENTRYPOINT ["/usr/local/bin/vector"]

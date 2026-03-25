@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-loki-config
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: mock-loki
+data:
+  RESPONSE_LATENCY_MS: "0"
+  ERROR_RATE: "0.0"

@@ -1,0 +1,401 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-daemonset-config
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: vector-daemonset
+data:
+  vector.yaml: |
+    data_dir: /var/lib/vector
+
+    ##
+    ## Sources
+    ##
+
+    sources:
+      kube-pods:
+        type: kubernetes_logs
+        use_apiserver_cache: true
+        glob_minimum_cooldown_ms: 5000
+        rotate_wait_secs: 600
+        max_line_bytes: 2637824
+        max_merged_line_bytes: 52428800
+        oldest_first: false
+        max_read_bytes: 1048576
+        auto_partial_merge: true
+        delay_deletion_ms: 600000
+        extra_namespace_label_selector: "kubernetes.io/metadata.name=profiling"
+
+      internal-metrics:
+        type: internal_metrics
+        namespace: vector
+        scrape_interval_secs: 15
+
+      journal:
+        type: journald
+        include_units:
+          - containerd
+          - kubelet
+          - chronyd
+          - kernel
+          - shell_history
+          - su
+          - sudo
+
+      var-log-files:
+        type: file
+        include:
+          - /var/log/audit/audit.log
+          - /var/log/syslog
+        ignore_not_found: true
+
+      heartbeat-metric:
+        type: static_metrics
+        metrics:
+          - name: timber_vector_audit_heartbeat
+            kind: gauge
+            value: 1.0
+        interval_secs: 30
+
+    ##
+    ## Transforms
+    ##
+
+    transforms:
+      kube-with-aenvid:
+        type: remap
+        inputs:
+          - kube-pods
+        drop_on_error: true
+        drop_on_abort: true
+        source: |
+          # Extract apolloEnvironmentId from the namespace labels on the pod
+          # In production, namespace labels carry the apollo environment ID
+          # Check the preferred label first, then fall back to the legacy label
+          namespace_labels = .kubernetes.namespace_labels
+
+          aenvid = ""
+          if exists(namespace_labels) {
+            if exists(namespace_labels."apollo.palantir.com/env-id") {
+              aenvid = string!(namespace_labels."apollo.palantir.com/env-id")
+            } else if exists(namespace_labels."apollo-environment-id") {
+              aenvid = string!(namespace_labels."apollo-environment-id")
+            }
+          }
+
+          if aenvid == "" {
+            abort
+          }
+
+          .apolloEnvironmentId = aenvid
+
+      apollo-metadata-routed:
+        type: route
+        inputs:
+          - kube-with-aenvid
+        route:
+          same_apollo_environment_id: '.apolloEnvironmentId == "profiling-env-001"'
+          different_apollo_environment_id: '.apolloEnvironmentId != "profiling-env-001"'
+
+      apollo-k8s-metadata:
+        type: remap
+        inputs:
+          - apollo-metadata-routed.same_apollo_environment_id
+          - apollo-metadata-routed.different_apollo_environment_id
+        drop_on_error: true
+        drop_on_abort: true
+        source: |
+          # ============================================================
+          # Full Kubernetes annotation parsing for SLS metadata
+          # Extracts service, product, stack, entity from pod annotations
+          # Mimics production Palantir Rubix annotation conventions
+          # ============================================================
+
+          annotations = .kubernetes.pod_annotations
+          namespace = string!(.kubernetes.pod_namespace)
+          pod_name = string!(.kubernetes.pod_name)
+          container_name = string!(.kubernetes.container_name)
+          node_name = string(.kubernetes.pod_node_name) ?? "unknown"
+          aenvid = string!(.apolloEnvironmentId)
+
+          # --- Parse SLS service info from pod annotations ---
+          # Primary: com.palantir.rubix.pod/sls-service-info-v2 (JSON blob)
+          # Fallback: individual annotations
+          sls_service = ""
+          sls_product = ""
+          sls_product_version = ""
+          sls_stack = ""
+          sls_entity = ""
+
+          if exists(annotations) {
+            sls_info_raw = string(annotations."com.palantir.rubix.pod/sls-service-info-v2") ?? ""
+            if sls_info_raw != "" {
+              sls_info, err = parse_json(sls_info_raw)
+              if err == null {
+                sls_service = string(sls_info.service) ?? ""
+                sls_product = string(sls_info.product) ?? ""
+                sls_product_version = string(sls_info.productVersion) ?? ""
+                sls_stack = string(sls_info.stack) ?? ""
+                sls_entity = string(sls_info.entity) ?? ""
+              }
+            }
+
+            # Fallback chain for service name
+            if sls_service == "" {
+              sls_service = string(annotations."com.palantir.rubix.pod/service-name") ?? ""
+            }
+            if sls_service == "" {
+              sls_service = string(annotations."app.kubernetes.io/name") ?? ""
+            }
+            if sls_service == "" {
+              sls_service = string(.kubernetes.pod_labels."app.kubernetes.io/name") ?? ""
+            }
+            if sls_service == "" {
+              sls_service = string(.kubernetes.pod_labels.app) ?? ""
+            }
+            if sls_service == "" {
+              # Last resort: derive from pod name by removing the trailing hash
+              parts = split(pod_name, "-")
+              if length(parts) > 2 {
+                sls_service = join!(slice!(parts, 0, length(parts) - 2), "-")
+              } else {
+                sls_service = pod_name
+              }
+            }
+
+            # Fallback chain for product
+            if sls_product == "" {
+              sls_product = string(annotations."com.palantir.rubix.pod/product-name") ?? ""
+            }
+            if sls_product == "" {
+              sls_product = sls_service
+            }
+
+            # Fallback chain for product version
+            if sls_product_version == "" {
+              sls_product_version = string(annotations."com.palantir.rubix.pod/product-version") ?? ""
+            }
+            if sls_product_version == "" {
+              sls_product_version = string(.kubernetes.pod_labels."app.kubernetes.io/version") ?? "0.0.0"
+            }
+
+            # Fallback chain for stack
+            if sls_stack == "" {
+              sls_stack = string(annotations."com.palantir.rubix.pod/stack-id") ?? ""
+            }
+            if sls_stack == "" {
+              sls_stack = namespace
+            }
+
+            # Fallback chain for entity
+            if sls_entity == "" {
+              sls_entity = string(annotations."com.palantir.rubix.pod/entity-name") ?? ""
+            }
+            if sls_entity == "" {
+              sls_entity = pod_name
+            }
+          } else {
+            # No annotations at all - use best-effort defaults
+            sls_service = string(.kubernetes.pod_labels."app.kubernetes.io/name") ?? pod_name
+            sls_product = sls_service
+            sls_product_version = "0.0.0"
+            sls_stack = namespace
+            sls_entity = pod_name
+          }
+
+          # --- Construct the apolloEntityId ---
+          apollo_entity_id = join!([aenvid, sls_stack, sls_service, sls_entity], ":")
+
+          # --- Build the SLS metadata object ---
+          sls = {}
+          sls.service = sls_service
+          sls.product = sls_product
+          sls.productVersion = sls_product_version
+          sls.stack = sls_stack
+          sls.entity = sls_entity
+          sls.apolloEnvironmentId = aenvid
+          sls.apolloEntityId = apollo_entity_id
+          sls.host = node_name
+          sls.container = container_name
+          sls.namespace = namespace
+          sls.pod = pod_name
+
+          # --- Capture original message ---
+          original_message = string(.message) ?? ""
+
+          # --- Capture original timestamp and source type ---
+          original_timestamp = .timestamp
+          original_source_type = .source_type
+
+          # --- Reconstruct event with only the fields we need ---
+          . = {}
+          .sls = sls
+          .message = original_message
+          .timestamp = original_timestamp
+          .source_type = original_source_type
+
+      var-log-files-metadata:
+        type: remap
+        inputs:
+          - var-log-files
+        source: |
+          # Map file paths to product identifiers for var-log sources
+          file_path = string!(.file)
+
+          product = "unknown"
+          service = "unknown"
+
+          if contains(file_path, "audit.log") {
+            product = "linux-auditd"
+            service = "auditd"
+          } else if contains(file_path, "syslog") {
+            product = "linux-syslog"
+            service = "syslog"
+          }
+
+          sls = {}
+          sls.service = service
+          sls.product = product
+          sls.productVersion = "0.0.0"
+          sls.stack = "infrastructure"
+          sls.entity = get_hostname!()
+          sls.apolloEnvironmentId = "profiling-env-001"
+          sls.apolloEntityId = join!(["profiling-env-001", "infrastructure", service, sls.entity], ":")
+          sls.host = get_hostname!()
+
+          .sls = sls
+
+      journal-metadata:
+        type: remap
+        inputs:
+          - journal
+        source: |
+          # Extract systemd unit and parse the journald realtime timestamp
+          unit = string(._SYSTEMD_UNIT) ?? "unknown.service"
+          # Strip the .service suffix for cleaner service names
+          service = replace(unit, r'.service$', "")
+
+          sls = {}
+          sls.service = service
+          sls.product = "systemd-" + service
+          sls.productVersion = "0.0.0"
+          sls.stack = "infrastructure"
+          sls.entity = get_hostname!()
+          sls.apolloEnvironmentId = "profiling-env-001"
+          sls.apolloEntityId = join!(["profiling-env-001", "infrastructure", service, sls.entity], ":")
+          sls.host = get_hostname!()
+
+          # Parse __REALTIME_TIMESTAMP if present (microseconds since epoch)
+          realtime_us = string(.__REALTIME_TIMESTAMP) ?? ""
+          if realtime_us != "" {
+            us_int, err = to_int(realtime_us)
+            if err == null {
+              .timestamp = from_unix_timestamp(us_int, "microseconds") ?? now()
+            }
+          }
+
+          .sls = sls
+
+      blocked-events:
+        type: filter
+        inputs:
+          - apollo-k8s-metadata
+          - var-log-files-metadata
+          - journal-metadata
+        condition:
+          type: vrl
+          source: |
+            # Blocklist filter - currently empty, but in production this would contain
+            # specific apolloEntityIds or service names that should be dropped.
+            # Events pass through if they do NOT match the blocklist.
+            blocklist = []
+            entity_id = string(.sls.apolloEntityId) ?? ""
+            !includes(blocklist, entity_id)
+
+      throttled-events:
+        type: throttle
+        inputs:
+          - blocked-events
+        key_field: "{{ sls.apolloEntityId }}"
+        threshold: 100
+        window_secs: 1
+
+      filtered-internal-metrics:
+        type: remap
+        inputs:
+          - internal-metrics
+        drop_on_error: true
+        drop_on_abort: true
+        source: |
+          # Only allow specific metric name prefixes through to reduce cardinality
+          allowed_prefixes = [
+            "vector_adaptive_concurrency",
+            "vector_api",
+            "vector_buffer",
+            "vector_component_errors",
+            "vector_component_received",
+            "vector_component_sent",
+            "vector_events",
+            "vector_file_",
+            "vector_internal_metrics",
+            "vector_kafka",
+            "vector_kubernetes",
+            "vector_open_connections",
+            "vector_processing_errors",
+            "vector_source_lag",
+            "vector_utilization"
+          ]
+
+          metric_name = string!(.name)
+          matched = false
+          for_each(allowed_prefixes) -> |_index, prefix| {
+            if starts_with(metric_name, prefix) {
+              matched = true
+            }
+          }
+
+          if !matched {
+            abort
+          }
+
+    ##
+    ## Sinks
+    ##
+
+    sinks:
+      aggregator:
+        type: vector
+        inputs:
+          - throttled-events
+          - heartbeat-metric
+        address: "vector-aggregator.profiling.svc.cluster.local:6000"
+        compression: true
+        healthcheck:
+          enabled: true
+        request:
+          adaptive_concurrency:
+            max_concurrency_limit: 4
+
+      prometheus-metrics:
+        type: prometheus_exporter
+        inputs:
+          - filtered-internal-metrics
+        address: "0.0.0.0:9598"
+        flush_period_secs: 300
+        buckets:
+          - 0.005
+          - 0.01
+          - 0.025
+          - 0.05
+          - 0.1
+          - 0.25
+          - 0.5
+          - 1.0
+          - 2.5
+          - 5.0
+          - 10.0
+          - 30.0
+          - 60.0
+          - 120.0
+          - 300.0
