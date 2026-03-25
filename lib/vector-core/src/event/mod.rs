@@ -105,6 +105,7 @@ impl Event {
     /// # Panics
     ///
     /// This function panics if self is anything other than an `Event::Log`.
+    #[inline]
     pub fn as_log(&self) -> &LogEvent {
         match self {
             Event::Log(log) => log,
@@ -117,6 +118,7 @@ impl Event {
     /// # Panics
     ///
     /// This function panics if self is anything other than an `Event::Log`.
+    #[inline]
     pub fn as_mut_log(&mut self) -> &mut LogEvent {
         match self {
             Event::Log(log) => log,
@@ -129,6 +131,7 @@ impl Event {
     /// # Panics
     ///
     /// This function panics if self is anything other than an `Event::Log`.
+    #[inline]
     pub fn into_log(self) -> LogEvent {
         match self {
             Event::Log(log) => log,
@@ -139,6 +142,7 @@ impl Event {
     /// Fallibly coerces self into a `LogEvent`
     ///
     /// If the event is a `LogEvent`, then `Some(log_event)` is returned, otherwise `None`.
+    #[inline]
     pub fn try_into_log(self) -> Option<LogEvent> {
         match self {
             Event::Log(log) => Some(log),
@@ -149,6 +153,7 @@ impl Event {
     /// Return self as a `LogEvent` if possible
     ///
     /// If the event is a `LogEvent`, then `Some(&log_event)` is returned, otherwise `None`.
+    #[inline]
     pub fn maybe_as_log(&self) -> Option<&LogEvent> {
         match self {
             Event::Log(log) => Some(log),
@@ -248,6 +253,7 @@ impl Event {
         }
     }
 
+    #[inline]
     pub fn metadata(&self) -> &EventMetadata {
         match self {
             Self::Log(log) => log.metadata(),
@@ -256,6 +262,7 @@ impl Event {
         }
     }
 
+    #[inline]
     pub fn metadata_mut(&mut self) -> &mut EventMetadata {
         match self {
             Self::Log(log) => log.metadata_mut(),
@@ -466,6 +473,7 @@ impl From<proto::SummaryQuantile> for metric::Quantile {
 }
 
 impl From<LogEvent> for Event {
+    #[inline]
     fn from(log: LogEvent) -> Self {
         Event::Log(log)
     }
