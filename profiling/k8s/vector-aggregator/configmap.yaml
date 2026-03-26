@@ -1,0 +1,1270 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-aggregator-config
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+data:
+  vector.yaml: |
+    data_dir: /var/lib/vector
+
+    ##
+    ## Sources
+    ##
+
+    sources:
+      daemonset:
+        type: vector
+        address: "0.0.0.0:6000"
+        shutdown_timeout_secs: 30
+
+      internal-metrics:
+        type: internal_metrics
+        namespace: vector
+        scrape_interval_secs: 15
+
+    ##
+    ## Transforms
+    ##
+
+    transforms:
+      ##
+      ## Route by source_type to separate log processing paths
+      ##
+      in:
+        type: route
+        inputs:
+          - daemonset
+        route:
+          logs: '.source_type == "kubernetes_logs" || .source_type == "file" || .source_type == "journald"'
+          metrics: '.source_type == "static_metrics" || .source_type == "internal_metrics"'
+
+      ##
+      ## ============================================================
+      ## SLS ENVELOPE PARSING (THE CRITICAL TRANSFORM)
+      ## ============================================================
+      ## This transform is the heart of the aggregator pipeline.
+      ## It performs multi-stage JSON parsing of SLS log envelopes:
+      ##   1. Shallow parse at depth 1 for type field validation
+      ##   2. Conjure union unwrapping (wrapped.1) across 8 inner types
+      ##   3. Full depth-3 parse for nested payload extraction
+      ##   4. Envelope construction with event_size and timestamp
+      ##
+      ## drop_on_error + reroute_dropped ensures malformed logs
+      ## are captured separately as non-SLS infrastructure logs.
+      ## ============================================================
+      ##
+      sls-envelopes-unsafe:
+        type: remap
+        inputs:
+          - in.logs
+        drop_on_error: true
+        reroute_dropped: true
+        source: |
+          # ---- Stage 0: Preserve metadata ----
+          sls_meta = .sls
+          raw_message = string!(.message)
+          original_timestamp = .timestamp
+
+          # ---- Stage 1: Shallow parse (depth 1) for type validation ----
+          # We first parse only the top level to check for the "type" field
+          # that indicates this is an SLS-formatted log envelope.
+          shallow, err = parse_json(raw_message)
+          if err != null {
+            # Not JSON at all - this will be rerouted as a non-SLS log
+            abort
+          }
+
+          # Check for SLS envelope type field
+          envelope_type = string(shallow.type) ?? ""
+          if envelope_type == "" {
+            # Check if this is a conjure union wrapper (e.g. {"service.1": {...}})
+            # SLS logs can arrive as either direct envelopes or conjure union types
+            is_conjure_union = false
+            known_union_types = [
+              "service.1",
+              "event.1",
+              "audit.2",
+              "audit.3",
+              "request.2",
+              "diagnostic.1",
+              "trace.1",
+              "metric.1"
+            ]
+
+            for_each(known_union_types) -> |_i, union_type| {
+              if exists(shallow, [union_type]) {
+                is_conjure_union = true
+                envelope_type = union_type
+              }
+            }
+
+            if !is_conjure_union {
+              # No recognized type field and not a conjure union - treat as non-SLS
+              abort
+            }
+          }
+
+          # ---- Stage 2: Conjure union unwrapping (wrapped.1) ----
+          # If the message is a conjure union wrapper, we need to extract
+          # the inner payload. This is a multi-step unwrap:
+          #   {"service.1": {"type": "service.1", "payload": {...}, ...}}
+          #   becomes the inner object directly.
+          envelope = null
+          payload_type = ""
+
+          known_envelope_types = [
+            "service.1",
+            "event.1",
+            "audit.2",
+            "audit.3",
+            "request.2",
+            "diagnostic.1",
+            "trace.1",
+            "metric.1"
+          ]
+
+          # Try conjure union unwrap first
+          unwrapped = false
+          for_each(known_envelope_types) -> |_i, candidate_type| {
+            if !unwrapped {
+              inner = shallow
+              if exists(inner, [candidate_type]) {
+                # This is a conjure union: extract the inner value
+                inner_val = get!(inner, [candidate_type])
+                if is_object(inner_val) {
+                  envelope = inner_val
+                  payload_type = candidate_type
+                  unwrapped = true
+                }
+              }
+            }
+          }
+
+          # If not a conjure union, the shallow parse IS the envelope
+          if !unwrapped {
+            envelope = shallow
+            payload_type = string(envelope.type) ?? envelope_type
+          }
+
+          # ---- Stage 3: Full depth parse for nested payload extraction ----
+          # Now we do a full-depth parse to get all nested fields.
+          # If we already have the full object from stage 1, we can proceed
+          # directly. Otherwise re-parse at full depth.
+          if envelope == null {
+            abort
+          }
+
+          # Validate required envelope fields
+          if !exists(envelope, ["type"]) && payload_type == "" {
+            abort
+          }
+
+          # Use payload_type if type field is missing in envelope
+          if !exists(envelope, ["type"]) {
+            envelope.type = payload_type
+          }
+
+          # ---- Stage 4: Extract payload based on type ----
+          payload = null
+          if exists(envelope, ["payload"]) {
+            payload = envelope.payload
+          } else if exists(envelope, ["serviceLogV1"]) {
+            # service.1 format: payload is in serviceLogV1
+            payload = envelope.serviceLogV1
+          } else if exists(envelope, ["eventLogV2"]) {
+            payload = envelope.eventLogV2
+          } else if exists(envelope, ["requestLogV2"]) {
+            payload = envelope.requestLogV2
+          } else if exists(envelope, ["auditLogV2"]) {
+            payload = envelope.auditLogV2
+          } else if exists(envelope, ["auditLogV3"]) {
+            payload = envelope.auditLogV3
+          } else if exists(envelope, ["diagnosticLogV1"]) {
+            payload = envelope.diagnosticLogV1
+          } else if exists(envelope, ["traceLogV1"]) {
+            payload = envelope.traceLogV1
+          } else if exists(envelope, ["metricLogV1"]) {
+            payload = envelope.metricLogV1
+          } else {
+            # The envelope itself may be the payload (flat format)
+            payload = envelope
+          }
+
+          # ---- Stage 5: Construct final envelope.1 format ----
+          # Build a canonical envelope with consistent structure
+
+          # Determine the level/severity
+          level = "INFO"
+          if is_object(payload) {
+            level = upcase(string(payload.level) ?? string(envelope.level) ?? "INFO")
+          }
+
+          # Calculate event_size in bytes
+          event_size = length(encode_json(envelope))
+
+          # Parse timestamp from the envelope or payload
+          event_timestamp = original_timestamp
+          ts_str = string(envelope.time) ?? string(envelope.timestamp) ?? ""
+          if ts_str == "" && is_object(payload) {
+            ts_str = string(payload.time) ?? string(payload.timestamp) ?? ""
+          }
+          if ts_str != "" {
+            parsed_ts, ts_err = parse_timestamp(ts_str, "%+")
+            if ts_err == null {
+              event_timestamp = parsed_ts
+            } else {
+              # Try ISO 8601 with milliseconds
+              parsed_ts2, ts_err2 = parse_timestamp(ts_str, "%Y-%m-%dT%H:%M:%S%.3fZ")
+              if ts_err2 == null {
+                event_timestamp = parsed_ts2
+              } else {
+                # Try epoch millis
+                epoch_ms, epoch_err = to_int(ts_str)
+                if epoch_err == null {
+                  event_timestamp = from_unix_timestamp(epoch_ms, "milliseconds") ?? original_timestamp
+                }
+              }
+            }
+          }
+
+          # Extract service-level metadata from envelope
+          e_service = string(envelope.service) ?? string(sls_meta.service) ?? "unknown"
+          e_stack = string(envelope.stack) ?? string(sls_meta.stack) ?? "unknown"
+          e_product = string(envelope.product) ?? string(sls_meta.product) ?? "unknown"
+          e_product_version = string(envelope.productVersion) ?? string(sls_meta.productVersion) ?? "0.0.0"
+          e_entity = string(sls_meta.entity) ?? "unknown"
+          e_aenvid = string(sls_meta.apolloEnvironmentId) ?? "profiling-env-001"
+          e_entity_id = string(sls_meta.apolloEntityId) ?? ""
+
+          # Reconstruct final event
+          . = {}
+          .envelope = {}
+          .envelope.type = payload_type
+          .envelope.payload = payload
+          .envelope.level = level
+          .envelope.service = e_service
+          .envelope.stack = e_stack
+          .envelope.product = e_product
+          .envelope.productVersion = e_product_version
+
+          .sls = sls_meta
+          .sls.service = e_service
+          .sls.product = e_product
+          .sls.productVersion = e_product_version
+          .sls.stack = e_stack
+          .sls.entity = e_entity
+          .sls.apolloEnvironmentId = e_aenvid
+          .sls.apolloEntityId = e_entity_id
+
+          .raw_payload = raw_message
+          .event_size = event_size
+          .timestamp = event_timestamp
+          .safe = true
+
+      ##
+      ## Route dropped (non-SLS) events to appropriate handlers
+      ##
+      routed-non-sls-logs:
+        type: route
+        inputs:
+          - sls-envelopes-unsafe.dropped
+        route:
+          infrastructure: '.sls.stack == "infrastructure" || .sls.product == "linux-auditd" || .sls.product == "linux-syslog" || .source_type == "journald"'
+          kube_pods: '.source_type == "kubernetes_logs"'
+
+      ##
+      ## Non-SLS log handlers: wrap into SLS envelope format
+      ##
+      non-sls-service:
+        type: remap
+        inputs:
+          - routed-non-sls-logs.kube_pods
+        source: |
+          # Wrap non-SLS kubernetes pod logs as service.1 envelopes
+          sls_meta = .sls
+          raw_msg = string(.message) ?? ""
+          original_ts = .timestamp
+
+          # Try to extract a log level from the message
+          level = "INFO"
+          if match(raw_msg, r'(?i)\b(ERROR|ERR)\b') {
+            level = "ERROR"
+          } else if match(raw_msg, r'(?i)\b(WARN|WARNING)\b') {
+            level = "WARN"
+          } else if match(raw_msg, r'(?i)\b(DEBUG|DBG)\b') {
+            level = "DEBUG"
+          } else if match(raw_msg, r'(?i)\b(TRACE|TRC)\b') {
+            level = "TRACE"
+          }
+
+          payload = {}
+          payload.type = "service.1"
+          payload.level = level
+          payload.message = raw_msg
+          payload.origin = "non-sls"
+          payload.thread = "main"
+          payload.unsafeParams = {}
+
+          . = {}
+          .envelope = {}
+          .envelope.type = "service.1"
+          .envelope.payload = payload
+          .envelope.level = level
+          .envelope.service = string(sls_meta.service) ?? "unknown"
+          .envelope.stack = string(sls_meta.stack) ?? "unknown"
+          .envelope.product = string(sls_meta.product) ?? "unknown"
+          .envelope.productVersion = string(sls_meta.productVersion) ?? "0.0.0"
+          .sls = sls_meta
+          .raw_payload = raw_msg
+          .event_size = length(encode_json(payload))
+          .timestamp = original_ts
+          .safe = false
+
+      non-sls-audit2:
+        type: remap
+        inputs:
+          - routed-non-sls-logs.infrastructure
+        source: |
+          # Wrap infrastructure logs (var-log, journald) as audit.2 envelopes
+          sls_meta = .sls
+          raw_msg = string(.message) ?? ""
+          original_ts = .timestamp
+
+          payload = {}
+          payload.type = "audit.2"
+          payload.name = "INFRASTRUCTURE_LOG"
+          payload.result = "SUCCESS"
+          payload.time = format_timestamp!(original_ts, "%Y-%m-%dT%H:%M:%S%.3fZ")
+          payload.host = string(sls_meta.host) ?? get_hostname!()
+          payload.product = string(sls_meta.product) ?? "infrastructure"
+          payload.productVersion = string(sls_meta.productVersion) ?? "0.0.0"
+          payload.otherUids = {}
+          payload.requestParams = {}
+          payload.resultParams = {}
+
+          . = {}
+          .envelope = {}
+          .envelope.type = "audit.2"
+          .envelope.payload = payload
+          .envelope.level = "INFO"
+          .envelope.service = string(sls_meta.service) ?? "unknown"
+          .envelope.stack = string(sls_meta.stack) ?? "infrastructure"
+          .envelope.product = string(sls_meta.product) ?? "infrastructure"
+          .envelope.productVersion = string(sls_meta.productVersion) ?? "0.0.0"
+          .sls = sls_meta
+          .raw_payload = raw_msg
+          .event_size = length(encode_json(payload))
+          .timestamp = original_ts
+          .safe = false
+
+      non-sls-audit3:
+        type: remap
+        inputs:
+          - routed-non-sls-logs._unmatched
+        source: |
+          # Wrap any remaining unmatched non-SLS logs as audit.3 with uuid_v4
+          sls_meta = .sls
+          raw_msg = string(.message) ?? ""
+          original_ts = .timestamp
+
+          payload = {}
+          payload.type = "audit.3"
+          payload.name = "UNSTRUCTURED_LOG"
+          payload.result = "SUCCESS"
+          payload.time = format_timestamp!(original_ts, "%Y-%m-%dT%H:%M:%S%.3fZ")
+          payload.uid = uuid_v4()
+          payload.host = string(sls_meta.host) ?? get_hostname!()
+          payload.product = string(sls_meta.product) ?? "unknown"
+          payload.productVersion = string(sls_meta.productVersion) ?? "0.0.0"
+          payload.organizations = []
+          payload.otherUids = {}
+          payload.requestParams = { "rawMessage": raw_msg }
+          payload.resultParams = {}
+
+          . = {}
+          .envelope = {}
+          .envelope.type = "audit.3"
+          .envelope.payload = payload
+          .envelope.level = "INFO"
+          .envelope.service = string(sls_meta.service) ?? "unknown"
+          .envelope.stack = string(sls_meta.stack) ?? "unknown"
+          .envelope.product = string(sls_meta.product) ?? "unknown"
+          .envelope.productVersion = string(sls_meta.productVersion) ?? "0.0.0"
+          .sls = sls_meta
+          .raw_payload = raw_msg
+          .event_size = length(encode_json(payload))
+          .timestamp = original_ts
+          .safe = false
+
+      non-sls-unsafe:
+        type: remap
+        inputs:
+          - non-sls-service
+          - non-sls-audit2
+          - non-sls-audit3
+        source: |
+          # Finalize non-SLS events: mark as unsafe, set timestamp, compute event_size
+          .safe = false
+          .timestamp = .timestamp ?? now()
+          .event_size = length(encode_json(.envelope))
+
+      ##
+      ## ============================================================
+      ## TOKEN REDACTION
+      ## ============================================================
+      ## Production Palantir token regex + generic bearer pattern
+      ## Applied to payload.message, full payload encode/replace/parse,
+      ## raw_payload, unsafeParams, and requestParams
+      ## ============================================================
+      ##
+      sls-redact-tokens:
+        type: remap
+        inputs:
+          - sls-envelopes-unsafe
+          - non-sls-unsafe
+        source: |
+          # ---- Define redaction patterns ----
+          # Palantir token pattern: base64-encoded JSON starting with {"plntr":...
+          # These appear as eyJwbG50ciI6I... in log output
+          palantir_token_pattern = r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}'
+          # Generic bearer token pattern
+          bearer_pattern = r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}'
+          # AWS-style keys
+          aws_key_pattern = r'AKIA[0-9A-Z]{16}'
+          # Generic long base64 tokens (likely API keys)
+          generic_token_pattern = r'[A-Za-z0-9_\-]{40,}={0,2}'
+          # Replacement string
+          redacted = "REDACTED_TOKEN"
+
+          # ---- Redact in payload.message if it exists ----
+          if is_object(.envelope.payload) && is_string(.envelope.payload.message) {
+            msg = string!(.envelope.payload.message)
+            msg = replace(msg, r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}', redacted)
+            msg = replace(msg, r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}', "Bearer " + redacted)
+            msg = replace(msg, r'AKIA[0-9A-Z]{16}', redacted)
+            .envelope.payload.message = msg
+          }
+
+          # ---- Redact in full payload via encode/replace/parse cycle ----
+          # This catches tokens that appear in any nested field
+          payload_json = encode_json(.envelope.payload)
+          payload_json = replace(payload_json, r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}', redacted)
+          payload_json = replace(payload_json, r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}', "Bearer " + redacted)
+          payload_json = replace(payload_json, r'AKIA[0-9A-Z]{16}', redacted)
+          parsed_payload, parse_err = parse_json(payload_json)
+          if parse_err == null {
+            .envelope.payload = parsed_payload
+          }
+
+          # ---- Redact in raw_payload ----
+          if is_string(.raw_payload) {
+            raw = string!(.raw_payload)
+            raw = replace(raw, r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}', redacted)
+            raw = replace(raw, r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}', "Bearer " + redacted)
+            raw = replace(raw, r'AKIA[0-9A-Z]{16}', redacted)
+            .raw_payload = raw
+          }
+
+          # ---- Redact in unsafeParams ----
+          if is_object(.envelope.payload) && exists(.envelope.payload, ["unsafeParams"]) {
+            unsafe_json = encode_json(.envelope.payload.unsafeParams)
+            unsafe_json = replace(unsafe_json, r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}', redacted)
+            unsafe_json = replace(unsafe_json, r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}', "Bearer " + redacted)
+            unsafe_json = replace(unsafe_json, r'AKIA[0-9A-Z]{16}', redacted)
+            parsed_unsafe, unsafe_err = parse_json(unsafe_json)
+            if unsafe_err == null {
+              .envelope.payload.unsafeParams = parsed_unsafe
+            }
+          }
+
+          # ---- Redact in requestParams ----
+          if is_object(.envelope.payload) && exists(.envelope.payload, ["requestParams"]) {
+            req_json = encode_json(.envelope.payload.requestParams)
+            req_json = replace(req_json, r'eyJwbG50ciI6I[A-Za-z0-9_\-\.]+={0,2}', redacted)
+            req_json = replace(req_json, r'[Bb]earer\s+[A-Za-z0-9_\-\.]{20,}={0,2}', "Bearer " + redacted)
+            req_json = replace(req_json, r'AKIA[0-9A-Z]{16}', redacted)
+            parsed_req, req_err = parse_json(req_json)
+            if req_err == null {
+              .envelope.payload.requestParams = parsed_req
+            }
+          }
+
+      ##
+      ## ============================================================
+      ## SAFE/UNSAFE SEPARATION
+      ## ============================================================
+      ## After redaction, separate safe (SLS-structured) events from
+      ## unsafe (non-SLS or malformed) events. Drop unsafeParams from
+      ## the safe path.
+      ## ============================================================
+      ##
+      sls-envelopes:
+        type: remap
+        inputs:
+          - sls-redact-tokens
+        source: |
+          # Drop unsafeParams from envelope for the safe/unsafe routing
+          # Safe events should not carry unsafeParams forward
+          if is_object(.envelope.payload) && exists(.envelope.payload, ["unsafeParams"]) {
+            del(.envelope.payload.unsafeParams)
+          }
+
+          # Check the safe field to determine routing
+          # Events that originated from valid SLS envelopes are marked safe=true
+          # Events from non-SLS logs are marked safe=false
+          .safe = bool(.safe) ?? false
+
+      ##
+      ## Route by payload type for type-specific processing
+      ##
+      sls-unsafe:
+        type: route
+        inputs:
+          - sls-envelopes
+        route:
+          service: '.envelope.type == "service.1" && .safe == false'
+          event: '.envelope.type == "event.1" && .safe == false'
+          audit2: '.envelope.type == "audit.2" && .safe == false'
+          audit3: '.envelope.type == "audit.3" && .safe == false'
+          request: '.envelope.type == "request.2" && .safe == false'
+          diagnostic: '.envelope.type == "diagnostic.1" && .safe == false'
+          trace: '.envelope.type == "trace.1" && .safe == false'
+          metric: '.envelope.type == "metric.1" && .safe == false'
+
+      sls:
+        type: route
+        inputs:
+          - sls-envelopes
+        route:
+          service: '.envelope.type == "service.1" && .safe == true'
+          event: '.envelope.type == "event.1" && .safe == true'
+          audit2: '.envelope.type == "audit.2" && .safe == true'
+          audit3: '.envelope.type == "audit.3" && .safe == true'
+          request: '.envelope.type == "request.2" && .safe == true'
+          diagnostic: '.envelope.type == "diagnostic.1" && .safe == true'
+          trace: '.envelope.type == "trace.1" && .safe == true'
+          metric: '.envelope.type == "metric.1" && .safe == true'
+
+      ##
+      ## ============================================================
+      ## LOG-TO-METRIC TRANSFORMS
+      ## ============================================================
+      ## Generate counter and histogram metrics from log events
+      ## for monitoring pipeline throughput and event sizes.
+      ## ============================================================
+      ##
+      sls-count-metric:
+        type: log_to_metric
+        inputs:
+          - sls.service
+          - sls.event
+          - sls.audit2
+          - sls.audit3
+          - sls.request
+          - sls.diagnostic
+          - sls.trace
+          - sls.metric
+          - sls-unsafe.service
+          - sls-unsafe.event
+          - sls-unsafe.audit2
+          - sls-unsafe.audit3
+          - sls-unsafe.request
+          - sls-unsafe.diagnostic
+          - sls-unsafe.trace
+          - sls-unsafe.metric
+          - sls._unmatched
+          - sls-unsafe._unmatched
+        metrics:
+          - type: counter
+            field: "event_size"
+            name: "sls_log_events_total"
+            tags:
+              type: "{{ envelope.type }}"
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              safe: "{{ safe }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              level: "{{ envelope.level }}"
+
+      sls-bytes-count-metric:
+        type: log_to_metric
+        inputs:
+          - sls.service
+          - sls.event
+          - sls.audit2
+          - sls.audit3
+          - sls.request
+          - sls.diagnostic
+          - sls.trace
+          - sls.metric
+          - sls-unsafe.service
+          - sls-unsafe.event
+          - sls-unsafe.audit2
+          - sls-unsafe.audit3
+          - sls-unsafe.request
+          - sls-unsafe.diagnostic
+          - sls-unsafe.trace
+          - sls-unsafe.metric
+          - sls._unmatched
+          - sls-unsafe._unmatched
+        metrics:
+          - type: counter
+            field: "event_size"
+            name: "sls_log_bytes_total"
+            increment_by_value: true
+            tags:
+              type: "{{ envelope.type }}"
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              safe: "{{ safe }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+
+      ##
+      ## ============================================================
+      ## METRICS SANITIZER
+      ## ============================================================
+      ## For metric.1 type events, validate metricName, drop stale
+      ## metrics (>45min), sanitize names/keys with regex, lowercase
+      ## tag keys, and set reserved tags.
+      ## ============================================================
+      ##
+      metrics-sanitizer:
+        type: remap
+        inputs:
+          - sls.metric
+          - sls-unsafe.metric
+        drop_on_error: true
+        drop_on_abort: true
+        source: |
+          # ---- Validate metric name ----
+          metric_payload = .envelope.payload
+          if !is_object(metric_payload) {
+            abort
+          }
+
+          metric_name = string(metric_payload.metricName) ?? ""
+          if metric_name == "" {
+            abort
+          }
+
+          # ---- Drop stale metrics (older than 45 minutes) ----
+          event_ts = .timestamp
+          age_secs = to_int(now()) - to_int(event_ts)
+          if age_secs > 2700 {
+            # 45 minutes = 2700 seconds
+            abort
+          }
+
+          # ---- Sanitize metric name ----
+          # Replace any characters that are not alphanumeric, underscore, or dot
+          sanitized_name = replace(metric_name, r'[^a-zA-Z0-9_\.]', "_")
+          # Collapse multiple underscores
+          sanitized_name = replace(sanitized_name, r'_{2,}', "_")
+          # Remove leading/trailing underscores
+          sanitized_name = replace(sanitized_name, r'^_|_$', "")
+          .envelope.payload.metricName = sanitized_name
+
+          # ---- Sanitize tag keys ----
+          if exists(metric_payload, ["tags"]) && is_object(metric_payload.tags) {
+            tags = object!(metric_payload.tags)
+            sanitized_tags = {}
+            for_each(tags) -> |key, value| {
+              # Lowercase the key
+              lower_key = downcase(key)
+              # Sanitize key characters
+              lower_key = replace(lower_key, r'[^a-z0-9_\.]', "_")
+              lower_key = replace(lower_key, r'_{2,}', "_")
+              lower_key = replace(lower_key, r'^_|_$', "")
+              sanitized_tags = set!(sanitized_tags, [lower_key], value)
+            }
+            .envelope.payload.tags = sanitized_tags
+          }
+
+          # ---- Set reserved tags ----
+          if !exists(.envelope.payload, ["tags"]) || !is_object(.envelope.payload.tags) {
+            .envelope.payload.tags = {}
+          }
+          .envelope.payload.tags.service = string(.sls.service) ?? "unknown"
+          .envelope.payload.tags.product = string(.sls.product) ?? "unknown"
+          .envelope.payload.tags.stack = string(.sls.stack) ?? "unknown"
+          .envelope.payload.tags.apolloEnvironmentId = string(.sls.apolloEnvironmentId) ?? ""
+          .envelope.payload.tags.entity = string(.sls.entity) ?? "unknown"
+
+      ##
+      ## Route metrics by value type for correct metric kind conversion
+      ##
+      metrics:
+        type: route
+        inputs:
+          - metrics-sanitizer
+        route:
+          gauge: 'exists(.envelope.payload.values.gauge)'
+          count: 'exists(.envelope.payload.values.count)'
+          histogram_mean: 'exists(.envelope.payload.values."histogram.mean")'
+          max: 'exists(.envelope.payload.values.max)'
+          min: 'exists(.envelope.payload.values.min)'
+          p50: 'exists(.envelope.payload.values."histogram.p50")'
+          p95: 'exists(.envelope.payload.values."histogram.p95")'
+          p99: 'exists(.envelope.payload.values."histogram.p99")'
+          p999: 'exists(.envelope.payload.values."histogram.p999")'
+
+      ##
+      ## ============================================================
+      ## METRICS LOG-TO-METRIC TRANSFORMS (9 transforms)
+      ## ============================================================
+      ## Each metric value type gets its own log_to_metric transform
+      ## to correctly convert the SLS metric payload into a Vector
+      ## metric event.
+      ## ============================================================
+      ##
+      metrics-gauge:
+        type: log_to_metric
+        inputs:
+          - metrics.gauge
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.gauge"
+            name: "{{ envelope.payload.metricName }}"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-count:
+        type: log_to_metric
+        inputs:
+          - metrics.count
+        metrics:
+          - type: counter
+            field: "envelope.payload.values.count"
+            increment_by_value: true
+            name: "{{ envelope.payload.metricName }}_total"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-histogram-mean:
+        type: log_to_metric
+        inputs:
+          - metrics.histogram_mean
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.histogram.mean"
+            name: "{{ envelope.payload.metricName }}_mean"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-max:
+        type: log_to_metric
+        inputs:
+          - metrics.max
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.max"
+            name: "{{ envelope.payload.metricName }}_max"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-min:
+        type: log_to_metric
+        inputs:
+          - metrics.min
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.min"
+            name: "{{ envelope.payload.metricName }}_min"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-p50:
+        type: log_to_metric
+        inputs:
+          - metrics.p50
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.histogram.p50"
+            name: "{{ envelope.payload.metricName }}_p50"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-p95:
+        type: log_to_metric
+        inputs:
+          - metrics.p95
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.histogram.p95"
+            name: "{{ envelope.payload.metricName }}_p95"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-p99:
+        type: log_to_metric
+        inputs:
+          - metrics.p99
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.histogram.p99"
+            name: "{{ envelope.payload.metricName }}_p99"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      metrics-p999:
+        type: log_to_metric
+        inputs:
+          - metrics.p999
+        metrics:
+          - type: gauge
+            field: "envelope.payload.values.histogram.p999"
+            name: "{{ envelope.payload.metricName }}_p999"
+            namespace: "sls"
+            tags:
+              service: "{{ sls.service }}"
+              product: "{{ sls.product }}"
+              stack: "{{ sls.stack }}"
+              apolloEnvironmentId: "{{ sls.apolloEnvironmentId }}"
+              entity: "{{ sls.entity }}"
+
+      ##
+      ## No-op grouping for all SLS metrics to feed into prometheus sink
+      ##
+      sls-metrics:
+        type: remap
+        inputs:
+          - metrics-gauge
+          - metrics-count
+          - metrics-histogram-mean
+          - metrics-max
+          - metrics-min
+          - metrics-p50
+          - metrics-p95
+          - metrics-p99
+          - metrics-p999
+        source: |
+          # Pass-through: metrics are already in the correct format
+          .
+
+      ##
+      ## ============================================================
+      ## LOKI LABEL REMAPPING
+      ## ============================================================
+      ## Flatten the envelope into Loki-compatible label format.
+      ## Separate paths for safe and unsafe events.
+      ## ============================================================
+      ##
+      loki-remap-unsafe:
+        type: remap
+        inputs:
+          - sls-unsafe.service
+          - sls-unsafe.event
+          - sls-unsafe.audit2
+          - sls-unsafe.audit3
+          - sls-unsafe.request
+          - sls-unsafe.diagnostic
+          - sls-unsafe.trace
+          - sls-unsafe._unmatched
+        source: |
+          # Flatten envelope fields into top-level for Loki label extraction
+          .loki_labels = {}
+          .loki_labels.service = string(.sls.service) ?? "unknown"
+          .loki_labels.product = string(.sls.product) ?? "unknown"
+          .loki_labels.stack = string(.sls.stack) ?? "unknown"
+          .loki_labels.apolloEnvironmentId = string(.sls.apolloEnvironmentId) ?? ""
+          .loki_labels.entity = string(.sls.entity) ?? "unknown"
+          .loki_labels.type = string(.envelope.type) ?? "unknown"
+          .loki_labels.level = string(.envelope.level) ?? "INFO"
+          .loki_labels.safe = "false"
+          .loki_labels.apolloEntityId = string(.sls.apolloEntityId) ?? ""
+          .loki_labels.productVersion = string(.sls.productVersion) ?? "0.0.0"
+
+          # Encode the full envelope as the log line for Loki
+          .message = encode_json(.envelope)
+
+      loki-remap-safe:
+        type: remap
+        inputs:
+          - sls.service
+          - sls.event
+          - sls.audit2
+          - sls.audit3
+          - sls.request
+          - sls.diagnostic
+          - sls.trace
+          - sls._unmatched
+        source: |
+          # Flatten envelope fields into top-level for Loki label extraction
+          .loki_labels = {}
+          .loki_labels.service = string(.sls.service) ?? "unknown"
+          .loki_labels.product = string(.sls.product) ?? "unknown"
+          .loki_labels.stack = string(.sls.stack) ?? "unknown"
+          .loki_labels.apolloEnvironmentId = string(.sls.apolloEnvironmentId) ?? ""
+          .loki_labels.entity = string(.sls.entity) ?? "unknown"
+          .loki_labels.type = string(.envelope.type) ?? "unknown"
+          .loki_labels.level = string(.envelope.level) ?? "INFO"
+          .loki_labels.safe = "true"
+          .loki_labels.apolloEntityId = string(.sls.apolloEntityId) ?? ""
+          .loki_labels.productVersion = string(.sls.productVersion) ?? "0.0.0"
+
+          # Encode the full envelope as the log line for Loki
+          .message = encode_json(.envelope)
+
+      ##
+      ## ============================================================
+      ## INFOSEC AUDIT PIPELINE
+      ## ============================================================
+      ## Filter, prefix, and encode audit logs for infosec S3 archival.
+      ## Only audit.3 events from allowlisted products under 5MB.
+      ## ============================================================
+      ##
+      infosec-audit-allowlist:
+        type: filter
+        inputs:
+          - sls.audit3
+          - sls-unsafe.audit3
+        condition:
+          type: vrl
+          source: |
+            # Only allow audit.3 events through to infosec
+            envelope_type = string(.envelope.type) ?? ""
+            if envelope_type != "audit.3" {
+              false
+            } else {
+              # Check event size limit (5MB)
+              event_size = to_int(.event_size) ?? 0
+              if event_size > 5242880 {
+                false
+              } else {
+                # Check product allowlist
+                product = string(.sls.product) ?? ""
+                allowlisted_products = [
+                  "auth-service",
+                  "multipass",
+                  "gatekeeper",
+                  "gotham-security",
+                  "foundry-security",
+                  "audit-service",
+                  "rbac-service",
+                  "token-service",
+                  "secrets-service",
+                  "sls-logging",
+                  "infosec-agent",
+                  "access-manager",
+                  "identity-provider",
+                  "encryption-service",
+                  "key-management-service",
+                  "certificate-authority",
+                  "policy-engine",
+                  "compliance-service",
+                  "sentinel",
+                  "watchdog"
+                ]
+                includes(allowlisted_products, product)
+              }
+            }
+
+      infosec-key-prefix:
+        type: remap
+        inputs:
+          - infosec-audit-allowlist
+        source: |
+          # Build hierarchical S3 key prefix for infosec audit archival
+          # Format: infosec/<aenvid>/<product>/<date>/<entity>/
+          aenvid = string(.sls.apolloEnvironmentId) ?? "unknown"
+          product = string(.sls.product) ?? "unknown"
+          entity = string(.sls.entity) ?? "unknown"
+          ts = format_timestamp!(.timestamp, "%Y/%m/%d/%H")
+
+          .infosec_key_prefix = "infosec/" + aenvid + "/" + product + "/" + ts + "/" + entity
+
+      infosec-encoding:
+        type: remap
+        inputs:
+          - infosec-key-prefix
+        source: |
+          # Determine encoding format for infosec output
+          # Default is JSON, but some products require syslog or raw format
+          product = string(.sls.product) ?? ""
+
+          encoding = "json"
+          if product == "linux-auditd" || product == "linux-syslog" {
+            encoding = "raw"
+          } else if product == "syslog-forwarder" || product == "syslog-relay" {
+            encoding = "syslog"
+          }
+
+          .infosec_encoding = encoding
+
+          # Prepare the message for raw encoding
+          if encoding == "raw" {
+            .infosec_raw_message = string(.raw_payload) ?? encode_json(.envelope)
+          }
+
+      infosec-encoding-route:
+        type: route
+        inputs:
+          - infosec-encoding
+        route:
+          json: '.infosec_encoding == "json"'
+          syslog: '.infosec_encoding == "syslog"'
+          raw: '.infosec_encoding == "raw"'
+
+      ##
+      ## ============================================================
+      ## INTERNAL METRICS FILTERING
+      ## ============================================================
+      ## Filter aggregator's own internal metrics for Prometheus export
+      ## ============================================================
+      ##
+      filtered-internal-metrics:
+        type: filter
+        inputs:
+          - internal-metrics
+        condition:
+          type: vrl
+          source: |
+            # Allow all internal metrics from the aggregator through
+            # In production this would be filtered to specific prefixes
+            true
+
+      heartbeat-metric:
+        type: filter
+        inputs:
+          - in.metrics
+        condition:
+          type: vrl
+          source: |
+            # Pass through heartbeat metrics from daemonsets
+            name = string(.name) ?? ""
+            name == "timber_vector_audit_heartbeat"
+
+    ##
+    ## Sinks
+    ##
+
+    sinks:
+      ##
+      ## Prometheus exporter for internal aggregator metrics
+      ##
+      prometheus-metrics:
+        type: prometheus_exporter
+        inputs:
+          - filtered-internal-metrics
+          - heartbeat-metric
+        address: "0.0.0.0:9598"
+        flush_period_secs: 300
+        buckets:
+          - 0.005
+          - 0.01
+          - 0.025
+          - 0.05
+          - 0.1
+          - 0.25
+          - 0.5
+          - 1.0
+          - 2.5
+          - 5.0
+          - 10.0
+          - 30.0
+          - 60.0
+          - 120.0
+          - 300.0
+
+      ##
+      ## Loki: primary log storage
+      ## Uses snappy compression, drop_newest buffer policy
+      ##
+      loki:
+        type: loki
+        inputs:
+          - loki-remap-safe
+          - loki-remap-unsafe
+        endpoint: "http://mock-loki.profiling.svc.cluster.local:3100"
+        compression: snappy
+        encoding:
+          codec: json
+        labels:
+          service: '{{ loki_labels.service }}'
+          product: '{{ loki_labels.product }}'
+          stack: '{{ loki_labels.stack }}'
+          apolloEnvironmentId: '{{ loki_labels.apolloEnvironmentId }}'
+          type: '{{ loki_labels.type }}'
+          level: '{{ loki_labels.level }}'
+          safe: '{{ loki_labels.safe }}'
+        out_of_order_action: accept
+        remove_label_fields: true
+        remove_timestamp: false
+        buffer:
+          type: memory
+          max_events: 50000
+          when_full: drop_newest
+        batch:
+          max_bytes: 1048576
+          timeout_secs: 5
+        request:
+          concurrency: 10
+          rate_limit_num: 100
+          retry_max_duration_secs: 30
+
+      ##
+      ## S3 Archive: long-term log storage
+      ## Gzip compressed, newline-delimited JSON, 50MB batches
+      ## Hierarchical key prefix by aenvid/product/date/entity
+      ##
+      s3_archive:
+        type: aws_s3
+        inputs:
+          - sls.service
+          - sls.event
+          - sls.audit2
+          - sls.audit3
+          - sls.request
+          - sls.diagnostic
+          - sls.trace
+          - sls._unmatched
+          - sls-unsafe.service
+          - sls-unsafe.event
+          - sls-unsafe.audit2
+          - sls-unsafe.audit3
+          - sls-unsafe.request
+          - sls-unsafe.diagnostic
+          - sls-unsafe.trace
+          - sls-unsafe._unmatched
+        bucket: "vector-logs"
+        key_prefix: "archive/{{ sls.apolloEnvironmentId }}/{{ sls.product }}/{{ sls.stack }}/%Y/%m/%d/%H/"
+        region: "us-east-1"
+        endpoint: "http://minio.profiling.svc.cluster.local:9000"
+        auth:
+          access_key_id: "minioadmin"
+          secret_access_key: "minioadmin"
+        compression: gzip
+        encoding:
+          codec: json
+        batch:
+          max_bytes: 52428800
+          timeout_secs: 300
+        request:
+          concurrency: 5
+          rate_limit_num: 50
+        buffer:
+          type: memory
+          max_events: 100000
+          when_full: drop_newest
+
+      ##
+      ## Infosec JSON: audit log archival for security compliance
+      ##
+      infosec-json:
+        type: aws_s3
+        inputs:
+          - infosec-encoding-route.json
+          - infosec-encoding-route.syslog
+        bucket: "vector-infosec"
+        key_prefix: "{{ infosec_key_prefix }}/"
+        region: "us-east-1"
+        endpoint: "http://minio.profiling.svc.cluster.local:9000"
+        auth:
+          access_key_id: "minioadmin"
+          secret_access_key: "minioadmin"
+        compression: gzip
+        encoding:
+          codec: json
+        batch:
+          max_bytes: 10485760
+          timeout_secs: 60
+        request:
+          concurrency: 3
+          rate_limit_num: 20
+        buffer:
+          type: memory
+          max_events: 50000
+          when_full: drop_newest
+
+      ##
+      ## Infosec RAW: raw audit log archival for products that emit unstructured logs
+      ##
+      infosec-raw:
+        type: aws_s3
+        inputs:
+          - infosec-encoding-route.raw
+        bucket: "vector-infosec"
+        key_prefix: "{{ infosec_key_prefix }}/raw/"
+        region: "us-east-1"
+        endpoint: "http://minio.profiling.svc.cluster.local:9000"
+        auth:
+          access_key_id: "minioadmin"
+          secret_access_key: "minioadmin"
+        compression: gzip
+        encoding:
+          codec: raw_message
+        batch:
+          max_bytes: 10485760
+          timeout_secs: 60
+        request:
+          concurrency: 3
+          rate_limit_num: 20
+        buffer:
+          type: memory
+          max_events: 50000
+          when_full: drop_newest
+
+      ##
+      ## Prometheus remote_write: SLS metrics forwarding
+      ##
+      prometheus:
+        type: prometheus_remote_write
+        inputs:
+          - sls-metrics
+          - sls-count-metric
+          - sls-bytes-count-metric
+        endpoint: "http://prometheus.profiling.svc.cluster.local:9090/api/v1/write"
+        batch:
+          max_events: 1000
+          timeout_secs: 10
+        request:
+          concurrency: 5
+          rate_limit_num: 100
+        buffer:
+          type: memory
+          max_events: 50000
+          when_full: drop_newest

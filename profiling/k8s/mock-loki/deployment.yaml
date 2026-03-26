@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-loki
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: mock-loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-loki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-loki
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3100"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: mock-loki
+          image: mock-loki:latest
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: mock-loki-config
+          ports:
+            - containerPort: 3100
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-loki
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: mock-loki
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mock-loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100

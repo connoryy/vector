@@ -1,0 +1,27 @@
+# Mixed-types runtime config: ~200 events/s, all SLS types including wrapped.1 and metric.1
+# Validates Vector's ability to parse, route, and handle every SLS log type correctly.
+interval_us: 5000
+message_size_bytes: 2048
+
+log_types:
+  - name: service.1
+    weight: 20
+    message_template: '{"type":"service.1","level":"{{choice INFO INFO DEBUG WARN ERROR}}","time":"{{timestamp}}","origin":"com.palantir.test.MixedService","thread":"worker-{{rand_int 1 32}}","message":"Service operation completed","params":{"requestId":"{{uuid}}","operation":"{{choice read write update delete}}","duration":"{{rand_int 1 1000}}ms"}}'
+  - name: request.2
+    weight: 15
+    message_template: '{"type":"request.2","time":"{{timestamp}}","method":"{{choice GET POST PUT DELETE PATCH}}","path":"/api/v{{choice 1 2}}/{{choice users resources events configs}}/{{rand_int 1 50000}}","status":{{choice 200 201 204 400 401 403 404 500}},"requestSize":{{rand_int 0 10000}},"responseSize":{{rand_int 50 50000}},"duration":{{rand_int 1 3000}},"traceId":"{{hex 16}}","params":{"userId":"user-{{rand_int 1 1000}}"}}'
+  - name: event.2
+    weight: 15
+    message_template: '{"type":"event.2","time":"{{timestamp}}","eventName":"{{choice workflow.started workflow.completed task.scheduled task.executed pipeline.stage.complete}}","values":{"taskId":"task-{{rand_int 1 100000}}","durationMs":{{rand_int 10 5000}},"itemsProcessed":{{rand_int 1 10000}}}}'
+  - name: audit.2
+    weight: 10
+    message_template: '{"type":"audit.2","time":"{{timestamp}}","name":"{{choice USER_LOGIN USER_LOGOUT PERMISSION_CHECK DATA_ACCESS CONFIG_CHANGE}}","result":"{{choice SUCCESS SUCCESS FAILURE}}","uid":"user-{{rand_int 1 500}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-{{rand_int 1 20}}","requestParams":{"action":"{{choice read write admin}}","resource":"/{{choice data config users}}/{{rand_int 1 5000}}"},"resultParams":{"allowed":true}}'
+  - name: audit.3
+    weight: 10
+    message_template: '{"type":"audit.3","time":"{{timestamp}}","name":"{{choice SENSITIVE_DATA_ACCESS ADMIN_ACTION CROSS_ORG_ACCESS}}","result":"{{choice SUCCESS FAILURE}}","uid":"user-{{rand_int 1 100}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-{{rand_int 1 10}}","requestParams":{"action":"{{choice read write delete escalate}}","resource":"/secure/{{rand_int 1 1000}}"},"resultParams":{"allowed":true,"auditLevel":"FULL"},"otherUids":["user-{{rand_int 100 500}}"],"entities":[{"type":"DATASET","id":"dataset-{{rand_int 1 1000}}"}]}'
+  - name: metric.1
+    weight: 15
+    message_template: '{"type":"metric.1","time":"{{timestamp}}","metricName":"{{choice server.request.duration jvm.heap.used jvm.gc.pause.duration process.cpu.usage disk.io.bytes network.bytes.sent}}","metricType":"{{choice histogram gauge counter meter}}","values":[{"count":{{rand_int 1 50000}},"min":{{rand_int 0 10}},"max":{{rand_int 100 50000}},"p50":{{rand_int 10 500}},"p95":{{rand_int 100 5000}},"p99":{{rand_int 500 20000}}}],"tags":{"service":"test-log-producer","host":"node-{{rand_int 1 20}}","env":"profiling"}}'
+  - name: wrapped.1
+    weight: 15
+    message_template: '{"type":"wrapped.1","time":"{{timestamp}}","entityName":"test-log-producer","entityVersion":"1.0.0","payload":{"type":"serviceLogV1","serviceLogV1":{"type":"service.1","level":"{{choice INFO WARN ERROR}}","time":"{{timestamp}}","origin":"com.palantir.test.WrappedMixed","thread":"wrapped-{{rand_int 1 16}}","message":"Wrapped log from nested service context","params":{"innerRequestId":"{{uuid}}","wrappedSource":"{{choice sidecar init-container helper-service}}"}}}}'

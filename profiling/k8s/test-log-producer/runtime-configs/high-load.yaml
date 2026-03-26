@@ -1,0 +1,21 @@
+# High-load runtime config: ~10000 events/s
+# Stress-tests Vector's throughput capacity under sustained high volume.
+interval_us: 100
+message_size_bytes: 1024
+
+log_types:
+  - name: service.1
+    weight: 35
+    message_template: '{"type":"service.1","level":"{{choice INFO INFO INFO WARN ERROR}}","time":"{{timestamp}}","origin":"com.palantir.test.HighLoad","thread":"pool-{{rand_int 1 64}}-thread-{{rand_int 1 32}}","message":"High throughput processing event","params":{"requestId":"{{uuid}}","batchId":"batch-{{rand_int 1 100000}}","duration":"{{rand_int 1 50}}ms"}}'
+  - name: request.2
+    weight: 30
+    message_template: '{"type":"request.2","time":"{{timestamp}}","method":"{{choice GET POST PUT DELETE}}","path":"/api/v{{choice 1 2}}/{{choice users resources events metrics}}/{{rand_int 1 100000}}","status":{{choice 200 200 200 200 201 204 400 404 429 500 502 503}},"requestSize":{{rand_int 0 10000}},"responseSize":{{rand_int 50 100000}},"duration":{{rand_int 1 5000}},"traceId":"{{hex 16}}","params":{"userId":"user-{{rand_int 1 50000}}"}}'
+  - name: event.2
+    weight: 15
+    message_template: '{"type":"event.2","time":"{{timestamp}}","eventName":"{{choice data.ingested data.transformed data.exported pipeline.checkpoint buffer.flush}}","values":{"count":{{rand_int 1 10000}},"batchSize":{{rand_int 100 50000}},"latencyMs":{{rand_int 1 500}}}}'
+  - name: audit.2
+    weight: 10
+    message_template: '{"type":"audit.2","time":"{{timestamp}}","name":"{{choice USER_ACTION RESOURCE_ACCESS DATA_EXPORT API_CALL}}","result":"{{choice SUCCESS SUCCESS FAILURE}}","uid":"user-{{rand_int 1 10000}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-{{rand_int 1 50}}","requestParams":{"action":"{{choice read write delete list create}}","resource":"/data/{{rand_int 1 100000}}"},"resultParams":{"allowed":true}}'
+  - name: metric.1
+    weight: 10
+    message_template: '{"type":"metric.1","time":"{{timestamp}}","metricName":"{{choice server.request.duration server.request.count server.active.connections jvm.heap.used jvm.gc.pause disk.io.write}}","metricType":"{{choice histogram gauge counter meter}}","values":[{"count":{{rand_int 100 100000}},"min":{{rand_int 0 5}},"max":{{rand_int 1000 50000}},"p50":{{rand_int 10 1000}},"p95":{{rand_int 500 10000}},"p99":{{rand_int 2000 50000}}}],"tags":{"service":"test-log-producer","host":"node-{{rand_int 1 50}}","region":"{{choice us-east eu-west ap-south}}"}}'

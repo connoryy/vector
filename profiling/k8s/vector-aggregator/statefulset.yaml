@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vector-aggregator
+  namespace: profiling
+  labels:
+    app.kubernetes.io/name: vector-aggregator
+spec:
+  serviceName: vector-aggregator
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector-aggregator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector-aggregator
+    spec:
+      containers:
+        - name: vector
+          image: vector:profiling
+          imagePullPolicy: Never
+          args:
+            - --config-dir
+            - /etc/vector/
+          env:
+            - name: VECTOR_LOG
+              value: info
+          ports:
+            - containerPort: 6000
+              name: vector
+            - containerPort: 9598
+              name: metrics
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - SYS_ADMIN
+                - NET_ADMIN
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            tcpSocket:
+              port: 6000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector/
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: vector-aggregator-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

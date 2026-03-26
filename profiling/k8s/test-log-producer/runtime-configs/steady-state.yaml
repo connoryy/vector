@@ -1,0 +1,21 @@
+# Steady-state runtime config: ~100 events/s, mixed SLS log types
+# Simulates normal production workload with a variety of log types.
+interval_us: 10000
+message_size_bytes: 1024
+
+log_types:
+  - name: service.1
+    weight: 40
+    message_template: '{"type":"service.1","level":"INFO","time":"{{timestamp}}","origin":"com.palantir.test.SteadyState","thread":"worker-{{rand_int 1 16}}","message":"Processing request completed successfully","params":{"requestId":"{{uuid}}","duration":"{{rand_int 5 200}}ms","itemsProcessed":{{rand_int 1 50}}}}'
+  - name: request.2
+    weight: 25
+    message_template: '{"type":"request.2","time":"{{timestamp}}","method":"{{choice GET POST PUT}}","path":"/api/v1/resources/{{rand_int 1 10000}}","status":{{choice 200 200 200 201 204 400 404 500}},"requestSize":{{rand_int 0 5000}},"responseSize":{{rand_int 100 50000}},"duration":{{rand_int 1 2000}},"traceId":"{{hex 16}}","params":{"userId":"user-{{rand_int 1 5000}}","region":"{{choice us-east eu-west ap-south}}"}}'
+  - name: event.2
+    weight: 15
+    message_template: '{"type":"event.2","time":"{{timestamp}}","eventName":"{{choice data.ingested data.transformed data.exported pipeline.checkpoint}}","values":{"count":{{rand_int 1 500}},"batchSize":{{rand_int 10 5000}},"latencyMs":{{rand_int 1 100}}}}'
+  - name: audit.2
+    weight: 10
+    message_template: '{"type":"audit.2","time":"{{timestamp}}","name":"{{choice USER_LOGIN USER_ACTION RESOURCE_ACCESS CONFIG_CHANGE}}","result":"{{choice SUCCESS SUCCESS SUCCESS FAILURE}}","uid":"user-{{rand_int 1 500}}","sid":"session-{{hex 8}}","tokenId":"token-{{hex 8}}","orgId":"org-{{rand_int 1 10}}","requestParams":{"action":"{{choice read write delete list}}","resource":"/data/{{rand_int 1 10000}}"},"resultParams":{"allowed":true}}'
+  - name: metric.1
+    weight: 10
+    message_template: '{"type":"metric.1","time":"{{timestamp}}","metricName":"{{choice server.request.duration server.request.count jvm.heap.used jvm.gc.pause}}","metricType":"{{choice histogram gauge counter}}","values":[{"count":{{rand_int 1 10000}},"min":{{rand_int 0 10}},"max":{{rand_int 100 10000}},"p50":{{rand_int 10 500}},"p95":{{rand_int 100 2000}},"p99":{{rand_int 500 5000}}}],"tags":{"service":"test-log-producer","host":"node-{{rand_int 1 10}}"}}'

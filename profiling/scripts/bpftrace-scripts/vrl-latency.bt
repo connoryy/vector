@@ -1,0 +1,94 @@
+/*
+ * vrl-latency.bt -- Trace VRL remap transform latency
+ *
+ * Traces key Vector VRL operations and produces latency histograms:
+ *   - remap transform process()
+ *   - parse_json function
+ *   - regex replace operations
+ *
+ * Usage:
+ *   bpftrace vrl-latency.bt -p $(pgrep vector)
+ *
+ * Or from within the pod:
+ *   bpftrace /path/to/vrl-latency.bt
+ */
+
+/* Trace remap transform process function */
+uprobe:/usr/local/bin/vector:*remap*transform*process*
+{
+    @remap_start[tid] = nsecs;
+}
+
+uretprobe:/usr/local/bin/vector:*remap*transform*process*
+{
+    if (@remap_start[tid]) {
+        $delta_us = (nsecs - @remap_start[tid]) / 1000;
+        @remap_latency_us = hist($delta_us);
+        @remap_count = count();
+        delete(@remap_start[tid]);
+    }
+}
+
+/* Trace parse_json VRL function */
+uprobe:/usr/local/bin/vector:*parse_json*
+{
+    @parse_json_start[tid] = nsecs;
+}
+
+uretprobe:/usr/local/bin/vector:*parse_json*
+{
+    if (@parse_json_start[tid]) {
+        $delta_us = (nsecs - @parse_json_start[tid]) / 1000;
+        @parse_json_latency_us = hist($delta_us);
+        @parse_json_count = count();
+        delete(@parse_json_start[tid]);
+    }
+}
+
+/* Trace regex replace operations */
+uprobe:/usr/local/bin/vector:*regex*replace*
+{
+    @regex_start[tid] = nsecs;
+}
+
+uretprobe:/usr/local/bin/vector:*regex*replace*
+{
+    if (@regex_start[tid]) {
+        $delta_us = (nsecs - @regex_start[tid]) / 1000;
+        @regex_replace_latency_us = hist($delta_us);
+        @regex_count = count();
+        delete(@regex_start[tid]);
+    }
+}
+
+/* Print a periodic summary every 10 seconds */
+interval:s:10
+{
+    time("\n--- VRL Latency Snapshot %H:%M:%S ---\n");
+    print(@remap_latency_us);
+    print(@parse_json_latency_us);
+    print(@regex_replace_latency_us);
+}
+
+END
+{
+    time("\n=== Final VRL Latency Report %H:%M:%S ===\n");
+    printf("\n--- Remap Transform Process Latency (us) ---\n");
+    print(@remap_latency_us);
+    printf("Total remap calls: ");
+    print(@remap_count);
+
+    printf("\n--- parse_json Latency (us) ---\n");
+    print(@parse_json_latency_us);
+    printf("Total parse_json calls: ");
+    print(@parse_json_count);
+
+    printf("\n--- Regex Replace Latency (us) ---\n");
+    print(@regex_replace_latency_us);
+    printf("Total regex replace calls: ");
+    print(@regex_count);
+
+    clear(@remap_start);
+    clear(@parse_json_start);
+    clear(@regex_start);
+}

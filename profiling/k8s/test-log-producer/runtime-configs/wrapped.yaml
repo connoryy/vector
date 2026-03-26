@@ -1,0 +1,9 @@
+# Wrapped runtime config: ~333 events/s, wrapped.1 format with nested serviceLogV1
+# Tests Vector's ability to unwrap and process nested SLS log envelopes.
+interval_us: 3000
+message_size_bytes: 2048
+
+log_types:
+  - name: wrapped.1
+    weight: 100
+    message_template: '{"type":"wrapped.1","time":"{{timestamp}}","entityName":"{{choice sidecar-proxy envoy-gateway auth-helper config-watcher}}","entityVersion":"{{choice 1.0.0 1.1.0 2.0.0 2.1.3}}","payload":{"type":"serviceLogV1","serviceLogV1":{"type":"service.1","level":"{{choice INFO INFO INFO WARN ERROR DEBUG}}","time":"{{timestamp}}","origin":"com.palantir.{{choice sidecar.ProxyHandler gateway.RequestRouter auth.TokenValidator config.Watcher}}","thread":"{{choice main worker event-loop io}}-{{rand_int 1 32}}","message":"{{choice \"Forwarded request to upstream\" \"Validated authentication token\" \"Refreshed configuration cache\" \"Health check completed\" \"Circuit breaker state change\" \"Rate limit threshold approaching\" \"TLS certificate rotation initiated\" \"Connection pool rebalanced\"}}","params":{"requestId":"{{uuid}}","upstreamService":"test-log-producer","upstreamHost":"10.{{rand_int 0 255}}.{{rand_int 0 255}}.{{rand_int 1 254}}","upstreamPort":{{choice 8443 8080 9090 3000}},"duration":"{{rand_int 1 2000}}ms","retries":{{rand_int 0 3}},"protocol":"{{choice HTTP/1.1 HTTP/2 gRPC}}"}}}}'

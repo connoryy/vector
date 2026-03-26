@@ -1,0 +1,30 @@
+# Malformed runtime config: ~500 events/s, mix of valid SLS + broken formats
+# Tests Vector's resilience when encountering invalid, truncated, or unexpected log data.
+interval_us: 2000
+message_size_bytes: 1024
+
+log_types:
+  - name: service.1
+    weight: 30
+    message_template: '{"type":"service.1","level":"INFO","time":"{{timestamp}}","origin":"com.palantir.test.MalformedMix","thread":"main","message":"Valid SLS log among malformed entries","params":{"requestId":"{{uuid}}"}}'
+  - name: truncated-json
+    weight: 20
+    message_template: '{"type":"service.1","level":"ERROR","time":"{{timestamp}}","origin":"com.palantir.test.Truncated","thread":"main","message":"This JSON is intentionally truncated and will not parse correctly","params":{"requestId":"{{uuid}}","data":"{{hex 64}}'
+  - name: unknown-type
+    weight: 15
+    message_template: '{"type":"custom.unknown.99","time":"{{timestamp}}","flavor":"exotic","data":{"key":"value-{{rand_int 1 10000}}","nested":{"deep":"structure-{{hex 8}}"}},"extra_field":"not in any SLS spec"}'
+  - name: empty-object
+    weight: 10
+    message_template: '{}'
+  - name: missing-type
+    weight: 10
+    message_template: '{"time":"{{timestamp}}","level":"WARN","message":"This log entry has no type field at all","origin":"com.palantir.test.NoType"}'
+  - name: wrong-level
+    weight: 5
+    message_template: '{"type":"service.1","level":"CATASTROPHIC","time":"{{timestamp}}","origin":"com.palantir.test.BadLevel","thread":"main","message":"Invalid log level value used"}'
+  - name: double-encoded
+    weight: 5
+    message_template: '{\"type\":\"service.1\",\"level\":\"INFO\",\"time\":\"{{timestamp}}\",\"origin\":\"com.palantir.test.DoubleEncoded\",\"thread\":\"main\",\"message\":\"This entry was double JSON-encoded\"}'
+  - name: bare-text
+    weight: 5
+    message_template: 'ERROR: something went terribly wrong at {{timestamp}} -- this is not JSON at all, just raw unstructured text with no format'
