@@ -175,6 +175,7 @@ impl TransformOutputsBuf {
     /// # Panics
     ///
     /// Panics if there is no output with the given name.
+    #[inline]
     pub fn push(&mut self, name: Option<&str>, event: Event) {
         match name {
             Some(name) => self.named_buffers.get_mut(name),
@@ -213,6 +214,7 @@ impl TransformOutputsBuf {
     /// # Panics
     ///
     /// Panics if there is no default output.
+    #[inline]
     pub fn take_primary(&mut self) -> OutputBuffer {
         std::mem::take(self.primary_buffer.as_mut().expect("no default output"))
     }
@@ -254,6 +256,7 @@ impl OutputBuffer {
         Self(Vec::with_capacity(capacity))
     }
 
+    #[inline]
     pub fn push(&mut self, event: Event) {
         // Coalesce multiple pushes of the same type into one array.
         match (event, self.0.last_mut()) {

@@ -60,11 +60,13 @@ struct Inner {
 }
 
 impl Inner {
+    #[inline]
     fn invalidate(&self) {
         self.size_cache.store(None);
         self.json_encoded_size_cache.store(None);
     }
 
+    #[inline]
     fn as_value(&self) -> &Value {
         &self.fields
     }
@@ -180,10 +182,12 @@ impl LogEvent {
         Self::from_str_legacy(String::from_utf8_lossy(msg.as_ref()).to_string())
     }
 
+    #[inline]
     pub fn value(&self) -> &Value {
         self.inner.as_ref().as_value()
     }
 
+    #[inline]
     pub fn value_mut(&mut self) -> &mut Value {
         let result = Arc::make_mut(&mut self.inner);
         // We MUST invalidate the inner size cache when making a
@@ -192,10 +196,12 @@ impl LogEvent {
         &mut result.fields
     }
 
+    #[inline]
     pub fn metadata(&self) -> &EventMetadata {
         &self.metadata
     }
 
+    #[inline]
     pub fn metadata_mut(&mut self) -> &mut EventMetadata {
         &mut self.metadata
     }
@@ -251,6 +257,7 @@ impl GetEventCountTags for LogEvent {
 }
 
 impl LogEvent {
+    #[inline]
     #[must_use]
     pub fn new_with_metadata(metadata: EventMetadata) -> Self {
         Self {
@@ -260,6 +267,7 @@ impl LogEvent {
     }
 
     ///  Create a `LogEvent` from a `Value` and `EventMetadata`
+    #[inline]
     pub fn from_parts(value: Value, metadata: EventMetadata) -> Self {
         Self {
             inner: Arc::new(value.into()),
@@ -268,12 +276,14 @@ impl LogEvent {
     }
 
     ///  Create a `LogEvent` from an `ObjectMap` and `EventMetadata`
+    #[inline]
     pub fn from_map(map: ObjectMap, metadata: EventMetadata) -> Self {
         let inner = Arc::new(Inner::from(Value::Object(map)));
         Self { inner, metadata }
     }
 
     /// Convert a `LogEvent` into a tuple of its components
+    #[inline]
     pub fn into_parts(mut self) -> (Value, EventMetadata) {
         self.value_mut();
 
