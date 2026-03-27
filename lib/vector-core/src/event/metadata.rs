@@ -1,6 +1,12 @@
 #![deny(missing_docs)]
 
-use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    fmt,
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
 
 use derivative::Derivative;
 use lookup::OwnedTargetPath;
@@ -284,11 +290,20 @@ impl Default for Inner {
 impl Default for EventMetadata {
     fn default() -> Self {
         Self {
-            inner: Arc::new(Inner::default()),
+            inner: Arc::clone(&DEFAULT_INNER),
             last_transform_timestamp: None,
         }
     }
 }
+
+/// Cached default `Arc<Inner>` for `EventMetadata`. The default metadata is
+/// always the same (empty value, no secrets, no finalizers, default schema),
+/// so we create it once and hand out cheap `Arc::clone`s. Since
+/// `EventMetadata` already uses copy-on-write via `Arc::make_mut`, any
+/// mutation will transparently clone the inner data on first write.
+/// In the common codec decode path, the metadata is never mutated, so
+/// events carry a zero-allocation reference to this static.
+static DEFAULT_INNER: LazyLock<Arc<Inner>> = LazyLock::new(|| Arc::new(Inner::default()));
 
 pub(super) fn default_schema_definition() -> Arc<schema::Definition> {
     Arc::new(schema::Definition::new_with_default_metadata(
@@ -617,5 +632,33 @@ mod test {
             merged.merge(m1.clone());
             assert_eq!(merged.source_event_id(), Some(id1));
         }
+    }
+
+    #[test]
+    fn default_inner_is_cached() {
+        // Verify the LazyLock caching: two default EventMetadata instances
+        // must share the same Arc<Inner> allocation (before any mutation).
+        let m1 = EventMetadata::default();
+        let m2 = EventMetadata::default();
+        assert!(
+            Arc::ptr_eq(&m1.inner, &m2.inner),
+            "default EventMetadata instances should share the same Arc<Inner> (cached via LazyLock)"
+        );
+    }
+
+    #[test]
+    fn default_inner_cow_on_mutation() {
+        // Verify copy-on-write: mutating one default EventMetadata must not
+        // affect another that shares the same cached Arc<Inner>.
+        let mut m1 = EventMetadata::default();
+        let m2 = EventMetadata::default();
+        assert!(Arc::ptr_eq(&m1.inner, &m2.inner));
+
+        // Trigger a mutation — this should clone the inner data.
+        m1.value_mut().insert("test_key", vrl::value::Value::Null);
+        assert!(
+            !Arc::ptr_eq(&m1.inner, &m2.inner),
+            "after mutation, the Arc<Inner> should no longer be shared"
+        );
     }
 }
