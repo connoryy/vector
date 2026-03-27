@@ -835,7 +835,6 @@ impl tracing::field::Visit for LogEvent {
 #[cfg(test)]
 mod test {
     use lookup::event_path;
-    use uuid::Version;
     use vrl::{btreemap, value};
 
     use super::*;
@@ -1200,22 +1199,19 @@ mod test {
     }
 
     #[test]
-    fn metadata_set_unique_uuid_v4_source_event_id() {
-        // Check if event id is UUID v4
+    fn metadata_source_event_id_defaults_to_none() {
+        // source_event_id is not generated eagerly; it starts as None
+        // to avoid the cost of UUID generation on every event creation.
         let log1 = LogEvent::default();
-        assert_eq!(
-            log1.metadata()
-                .source_event_id()
-                .expect("source_event_id should be auto-generated for new events")
-                .get_version(),
-            Some(Version::Random)
-        );
+        assert_eq!(log1.metadata().source_event_id(), None);
+    }
 
-        // Check if event id is unique on creation
-        let log2 = LogEvent::default();
-        assert_ne!(
-            log1.metadata().source_event_id(),
-            log2.metadata().source_event_id()
-        );
+    #[test]
+    fn metadata_with_source_event_id_roundtrips() {
+        use uuid::Uuid;
+        let id = Uuid::new_v4();
+        let metadata = EventMetadata::default().with_source_event_id(Some(id));
+        let log = LogEvent::new_with_metadata(metadata);
+        assert_eq!(log.metadata().source_event_id(), Some(id));
     }
 }
