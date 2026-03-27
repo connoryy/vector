@@ -285,7 +285,7 @@ impl Default for Inner {
             upstream_id: None,
             dropped_fields: ObjectMap::new(),
             datadog_origin_metadata: None,
-            source_event_id: Some(Uuid::new_v4()),
+            source_event_id: None,
         }
     }
 }
@@ -610,20 +610,30 @@ mod test {
 
     #[test]
     fn metadata_source_event_id_merging() {
-        let m1 = EventMetadata::default();
-        let m2 = EventMetadata::default();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let m1 = EventMetadata::default().with_source_event_id(Some(id1));
+        let m2 = EventMetadata::default().with_source_event_id(Some(id2));
 
-        // Always maintain the original source event id when merging, similar to how we handle other metadata.
+        // Always maintain the original source event id when merging.
         {
             let mut merged = m1.clone();
             merged.merge(m2.clone());
-            assert_eq!(merged.source_event_id(), m1.source_event_id());
+            assert_eq!(merged.source_event_id(), Some(id1));
         }
 
         {
             let mut merged = m2.clone();
             merged.merge(m1.clone());
-            assert_eq!(merged.source_event_id(), m2.source_event_id());
+            assert_eq!(merged.source_event_id(), Some(id2));
+        }
+
+        // Merging None with Some fills in the id.
+        {
+            let mut merged = EventMetadata::default();
+            assert_eq!(merged.source_event_id(), None);
+            merged.merge(m1.clone());
+            assert_eq!(merged.source_event_id(), Some(id1));
         }
     }
 }
