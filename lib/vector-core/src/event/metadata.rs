@@ -293,11 +293,20 @@ impl Default for Inner {
 impl Default for EventMetadata {
     fn default() -> Self {
         Self {
-            inner: Arc::new(Inner::default()),
+            inner: Arc::clone(&DEFAULT_INNER),
             last_transform_timestamp: None,
         }
     }
 }
+
+/// Cached default `Arc<Inner>` for `EventMetadata`. The default metadata is
+/// always the same (empty value, no secrets, no finalizers, default schema),
+/// so we create it once and hand out cheap `Arc::clone`s. Since
+/// `EventMetadata` already uses copy-on-write via `Arc::make_mut`, any
+/// mutation will transparently clone the inner data on first write.
+/// In the common codec decode path, the metadata is never mutated, so
+/// events carry a zero-allocation reference to this static.
+static DEFAULT_INNER: LazyLock<Arc<Inner>> = LazyLock::new(|| Arc::new(Inner::default()));
 
 /// Cached default schema definition. The default is always the same
 /// (`Kind::any()` with both log namespaces), so we create it once and
@@ -635,5 +644,64 @@ mod test {
             merged.merge(m1.clone());
             assert_eq!(merged.source_event_id(), Some(id1));
         }
+    }
+
+    #[test]
+    fn default_schema_definition_is_cached() {
+        // Verify the LazyLock caching: two calls must return Arcs pointing to the same allocation
+        let def1 = super::default_schema_definition();
+        let def2 = super::default_schema_definition();
+        assert!(
+            Arc::ptr_eq(&def1, &def2),
+            "default_schema_definition should return the same Arc (cached via LazyLock)"
+        );
+    }
+
+    #[test]
+    fn default_schema_definition_content_is_correct() {
+        // Verify the cached definition has the expected content
+        use crate::config::LogNamespace;
+        let def = super::default_schema_definition();
+        let log_namespaces = def.log_namespaces();
+        assert!(log_namespaces.contains(&LogNamespace::Legacy));
+        assert!(log_namespaces.contains(&LogNamespace::Vector));
+    }
+
+    #[test]
+    fn metadata_merge_none_with_none_stays_none() {
+        let mut m1 = EventMetadata::default();
+        let m2 = EventMetadata::default();
+        assert_eq!(m1.source_event_id(), None);
+        assert_eq!(m2.source_event_id(), None);
+        m1.merge(m2);
+        assert_eq!(
+            m1.source_event_id(),
+            None,
+            "merging two None source_event_ids must stay None"
+        );
+    }
+
+    #[test]
+    fn metadata_merge_some_with_none_keeps_some() {
+        let id = Uuid::new_v4();
+        let mut m1 = EventMetadata::default().with_source_event_id(Some(id));
+        let m2 = EventMetadata::default();
+        m1.merge(m2);
+        assert_eq!(
+            m1.source_event_id(),
+            Some(id),
+            "merging Some with None must keep Some"
+        );
+    }
+
+    #[test]
+    fn metadata_default_source_event_id_is_none() {
+        // Explicitly test the lazy UUID optimization
+        let m = EventMetadata::default();
+        assert_eq!(
+            m.source_event_id(),
+            None,
+            "default EventMetadata must have source_event_id = None (lazy UUID optimization)"
+        );
     }
 }
