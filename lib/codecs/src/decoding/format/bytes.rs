@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use bytes::Bytes;
 use lookup::OwnedTargetPath;
 use serde::{Deserialize, Serialize};
@@ -8,7 +10,7 @@ use vector_core::{
     schema,
     schema::meaning,
 };
-use vrl::value::Kind;
+use vrl::value::{KeyString, Kind, Value};
 
 use super::Deserializer;
 
@@ -61,15 +63,41 @@ impl BytesDeserializerConfig {
 #[derive(Debug, Clone)]
 pub struct BytesDeserializer;
 
+/// Cached message key for the Legacy log namespace. Extracted once from the
+/// global `log_schema()` to avoid repeated path parsing and KeyString
+/// allocation on every event.
+static LEGACY_MESSAGE_KEY: LazyLock<Option<KeyString>> = LazyLock::new(|| {
+    log_schema().message_key().and_then(|path| {
+        if path.segments.len() == 1 {
+            match path.segments.first() {
+                Some(vrl::path::OwnedSegment::Field(key)) => Some(key.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+});
+
 impl BytesDeserializer {
     /// Deserializes the given bytes, which will always produce a single `LogEvent`.
     pub fn parse_single(&self, bytes: Bytes, log_namespace: LogNamespace) -> LogEvent {
         match log_namespace {
             LogNamespace::Vector => log_namespace.new_log_from_data(bytes),
             LogNamespace::Legacy => {
-                let mut log = LogEvent::default();
-                log.maybe_insert(log_schema().message_key_target_path(), bytes);
-                log
+                // Construct the LogEvent directly from a pre-built ObjectMap
+                // instead of LogEvent::default() + maybe_insert(). This avoids
+                // the Arc::make_mut COW check, recursive Value::insert path
+                // traversal, and KeyString allocation on every event.
+                if let Some(key) = LEGACY_MESSAGE_KEY.as_ref() {
+                    let mut map = vrl::value::ObjectMap::new();
+                    map.insert(key.clone(), Value::from(bytes));
+                    LogEvent::from_parts(Value::Object(map), Default::default())
+                } else {
+                    let mut log = LogEvent::default();
+                    log.maybe_insert(log_schema().message_key_target_path(), bytes);
+                    log
+                }
             }
         }
     }
