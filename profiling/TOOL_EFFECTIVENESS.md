@@ -1,65 +1,69 @@
-# Tool Effectiveness Tracker
+# Tool Effectiveness
 
-Updated automatically after each auto-optimize iteration.
-Used to reflect on which tools and approaches produce results vs waste time.
+<!-- Auto-optimize tool effectiveness tracker. Updated after each iteration. -->
 
-## Tool Usage Summary
+## Summary (across all iterations)
 
-| Tool | Times Used | Led to Optimization | Wasted Time | Notes |
-|------|-----------|-------------------|-------------|-------|
-| `cargo bench --bench remap` | 2 | 1 (iteration 1) | 0 | Fast, reliable. Should ALWAYS run. |
-| `cargo bench --bench transform` | 0 | 0 | 0 | Never tried. |
-| `cargo bench --bench event` | 0 | 0 | 0 | Never tried. |
-| Source code Read/Grep | ~50 | 3 | ~47 | Massively overused. Led to 14 duplicate PRs finding the same into_parts pattern. |
-| `profile-cpu.sh` (perf flamegraph) | 0 | 0 | 0 | Never used — cluster wasn't running. |
-| `profile-full.sh` | 0 | 0 | 0 | Never used. |
-| bpftrace scripts | 0 | 0 | 0 | Never used. |
-| strace | 0 | 0 | 0 | Never used. |
-| valgrind/cachegrind | 0 | 0 | 0 | Never used. |
-| coz (causal profiling) | 0 | 0 | 0 | Never used. |
-| Custom microbenchmark | 0 | 0 | 0 | Never written. |
-| macOS `sample` command | 0 | 0 | 0 | Never used. |
-| Criterion HTML reports | 0 | 0 | 0 | Never checked. |
+| Tool | Uses | Useful | Notes |
+|------|------|--------|-------|
+| bench-and-profile.sh | Every iteration | HIGH | Core tool. Must pass --features/--binaries/--extra flags. |
+| parse-sample-output.sh | Every iteration | HIGH (after fix) | Was broken (gawk syntax). Fixed in iteration 2 timeframe. |
+| Explore agent | 2 | HIGH | Good for usage analysis (source_event_id, EventMetadata mutation paths) |
+| cargo clean -p | 1 needed | HIGH | Required after git reset to avoid stale bench binaries. Added to Step 2. |
+| WebFetch | 12+ (iter 3) | LOW | Used to find external crate code. Massive waste. Fixed with anti-pattern #7. |
+| Manual sample profile parsing | 2 (iter 1-2) | MEDIUM | Workaround for broken parse-sample-output.sh. No longer needed. |
 
-## Observations
+## Iteration 1 (backfilled)
 
-1. **Source code analysis dominated** — The agent defaulted to reading .rs files because it's instant. This found real issues but also led to massive duplication (same hotspot 14 times).
-2. **No profiling tools were ever used** — cargo bench ran twice. perf, bpftrace, strace, coz, valgrind were never invoked despite being available.
-3. **No microbenchmarks were written** — The agent relied entirely on the existing remap bench (3 operations). Targeted benchmarks for specific hotspots would have been more informative.
-4. **Benchmark-first wasn't enforced** — Despite the prompt saying "MANDATORY", the agent skipped benchmarks in most iterations.
+### bench-and-profile.sh
+- **Effectiveness**: LOW (due to tooling bugs)
+- **Notes**: Claude couldn't invoke it correctly — env vars not in prompt. Spent ~15 tool calls figuring out BENCH_FEATURES/BENCH_BINARIES/BENCH_EXTRA. Top-stacks files were empty (parse-sample-output.sh broken). Eventually ran cargo bench directly.
 
-## Recommendations for Next Session
+### parse-sample-output.sh
+- **Effectiveness**: BROKEN
+- **Notes**: Used gawk `match($0, /pattern/, m)` third-arg capture — fails silently on macOS BSD awk. Produced empty output. Fixed later.
 
-- Force benchmark execution by checking for `/tmp/bench-baseline.txt` before proceeding
-- Deprioritize source code browsing — it's a trap that leads to the same findings
-- Try `cargo bench --bench event` to find event model overhead
-- Write a custom bench for fanout cloning (Priority 1 lead)
-- If cluster is running, use `profile-full.sh` at least once to get real CPU data
+## Iteration 2
 
-## Session History
+### bench-and-profile.sh
+- **Effectiveness**: HIGH
+- **Notes**: Ran all 4 bench suites + CPU profiling in one command. Identified `rand_chacha` at 4.5% which directly pointed to UUID generation. The summary.txt and top-stacks.txt output was immediately actionable.
 
-### Session 1 (2026-03-24 to 2026-03-25)
+### Explore agent (for usage analysis)
+- **Effectiveness**: HIGH
+- **Notes**: Used to search entire codebase for `source_event_id` usage. Correctly identified that it's only used in proto serialization and tests — confirmed the optimization was safe. Saved significant manual grep time.
 
-**What happened:**
-- 15+ iterations of auto-optimize loop
-- 10 PRs created, 8 were duplicates of the same into_parts optimization
-- 3 unique optimizations found: into_parts Arc avoidance, VrlTarget decompose/recompose, #[inline] annotations
-- Total improvement: ~1-3% on remap benchmarks
+### Anti-pattern observed
+- **Issue**: Re-implemented an optimization that was already on the branch. The `git reset --hard connoryy/connor/vector-optimized` included commit `bb2a1d234` which was the exact same change.
+- **Root cause**: The optimization log didn't have an entry for this commit, so it appeared as new work.
+- **Fix**: At Step 2, always run `git log --oneline master..HEAD` to see ALL commits on the optimized branch and compare against the optimization log. If there are unlogged commits, log them first before starting new work.
 
-**What worked:**
-- cargo bench provided reliable before/after numbers
-- Source code analysis found real hotspots (into_parts, VrlTarget lifecycle)
-- The decompose/recompose change (PR #7) was the most significant
+## Iteration 3
 
-**What didn't work:**
-- Optimization log was overwritten between iterations → duplicate work
-- No leads file → agent re-discovered same hotspot every time
-- No profiling tools used → missed opportunities for deeper analysis
-- Agent defaulted to reading code instead of measuring
+### bench-and-profile.sh
+- **Effectiveness**: HIGH
+- **Notes**: Ran correctly with flags. Top-stacks worked (parse-sample-output.sh fixed). Noise detection flagged 17 unreliable benchmarks. However, Claude used stale cached results from a prior run instead of re-running fresh.
 
-**Fixed for next session:**
-- NEXT_LEADS.md provides cross-iteration knowledge
-- Optimization log backup/restore across git operations
-- Prompt says "PROFILE FIRST, CODE SECOND"
-- Model upgraded to Opus
-- Stream output filter shows tool calls in real time
+### Explore agent (for codec mutation analysis)
+- **Effectiveness**: HIGH
+- **Notes**: Confirmed EventMetadata is never mutated in codec decode path — key insight that made the DEFAULT_INNER optimization viable.
+
+### Anti-pattern observed
+- **Issue**: ~60 tool calls hunting for `coerce_to_bytes` in external VRL crate. grep, find, cargo doc, WebFetch — all wasted.
+- **Root cause**: Function is in `~/.cargo/git/checkouts/vrl-.../src/value/value/serde.rs`. Claude didn't know to check there.
+- **Fix**: Anti-pattern #7 added ("max 3 calls to find a function definition, check ~/.cargo/{git,registry}").
+
+### Anti-pattern observed
+- **Issue**: Used stale benchmark results ("from 12:21 today") instead of running fresh. Noise detection showed 17 benchmarks unreliable.
+- **Fix**: Anti-pattern #6 added ("DO NOT reuse stale benchmark results").
+
+## Iteration 4 (backfilled)
+
+### bench-and-profile.sh
+- **Effectiveness**: HIGH
+- **Notes**: Benchmark comparison had a bug — remap results showed `change_pct: 0.0` because `collect-criterion-results.py` compares against `target/criterion/` cache which gets overwritten. The after-phase should diff against baseline JSON instead.
+
+### Known tooling bug
+- **Issue**: `collect-criterion-results.py --previous` flag works correctly, but `target/criterion/` data is overwritten by the after-run, making the comparison use after-vs-after instead of baseline-vs-after.
+- **Workaround**: Back up `target/criterion/` between baseline and after runs, or compare using the JSON files directly.
+- **Status**: NOT YET FIXED.
