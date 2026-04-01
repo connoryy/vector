@@ -84,6 +84,35 @@ impl Decoder {
                 Error::ParsingError(error)
             })
     }
+
+    /// Decode all frames from the buffer, calling `f` for each decoded frame.
+    ///
+    /// For supported framers (character-delimited, newline-delimited), this
+    /// uses batch framing with `memchr_iter` for better throughput. Falls
+    /// back to the standard `decode_eof` loop for other framers.
+    ///
+    /// Processing events via callback (instead of collecting into a Vec)
+    /// preserves the memory access pattern of the per-frame decode loop:
+    /// each event is created, passed to `f`, and dropped before the next
+    /// event is created, keeping the working set in L1/L2 cache.
+    pub fn decode_all<F>(&mut self, buf: &mut BytesMut, mut f: F) -> Result<(), Error>
+    where
+        F: FnMut(DecodedFrame),
+    {
+        if let Some(frames) = self.framer.decode_all_frames(buf) {
+            for frame in frames {
+                f(self.deserializer_parse(frame)?);
+            }
+        } else {
+            // Fallback: standard decode_eof loop
+            while let Some(d) =
+                <Self as tokio_util::codec::Decoder>::decode_eof(self, buf)?
+            {
+                f(d);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl tokio_util::codec::Decoder for Decoder {

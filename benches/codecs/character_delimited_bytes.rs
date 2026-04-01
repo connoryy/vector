@@ -5,7 +5,6 @@ use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group,
     measurement::WallTime,
 };
-use tokio_util::codec::Decoder;
 use vector_lib::codecs::{
     BytesDeserializer, CharacterDelimitedDecoder,
     decoding::{Deserializer, Framer},
@@ -59,14 +58,8 @@ fn decoding(c: &mut Criterion) {
 
                         (Box::new(decoder), param.input.clone())
                     },
-                    |(mut decoder, mut input)| loop {
-                        match decoder.decode_eof(&mut input) {
-                            Ok(Some(_)) => continue,
-                            Ok(None) => break,
-                            Err(_) => {
-                                unreachable!()
-                            }
-                        }
+                    |(mut decoder, mut input)| {
+                        decoder.decode_all(&mut input, |_| {}).unwrap();
                     },
                     BatchSize::SmallInput,
                 )

@@ -198,6 +198,23 @@ pub enum Framer {
     VarintLengthDelimited(VarintLengthDelimitedDecoder),
 }
 
+impl Framer {
+    /// Decode all frames from the buffer in a single batch.
+    ///
+    /// For framers that support batch decoding (`CharacterDelimited` and
+    /// `NewlineDelimited`), this uses `memchr_iter` for a single SIMD pass
+    /// and `Bytes::slice()` to avoid per-frame `split_to`/`freeze` overhead.
+    ///
+    /// Other framers fall back to the standard `decode_eof` loop.
+    pub fn decode_all_frames(&mut self, buf: &mut BytesMut) -> Option<SmallVec<[Bytes; 4]>> {
+        match self {
+            Framer::CharacterDelimited(framer) => Some(framer.decode_all_frames(buf)),
+            Framer::NewlineDelimited(framer) => Some(framer.decode_all_frames(buf)),
+            _ => None, // fallback: caller should use decode_eof loop
+        }
+    }
+}
+
 impl tokio_util::codec::Decoder for Framer {
     type Item = Bytes;
     type Error = BoxedFramingError;
