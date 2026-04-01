@@ -12,7 +12,7 @@ According to the [tests], we see improvements of up to 15% more processed log ev
 
 More information about PGO in Vector you can read in the corresponding GitHub [issue].
 
-### How to build Vector with PGO?
+## How to build Vector with PGO?
 
 There are two major kinds of PGO: Instrumentation and Sampling (also known as AutoFDO). In this guide, is described the Instrumentation PGO with Vector. In this guide we use [cargo-pgo] for building Vector with PGO.
 

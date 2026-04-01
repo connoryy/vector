@@ -43,7 +43,7 @@ follows:
 
 There are a couple of things to be aware of:
 
-#### Removed options
+## Removed options
 
 There are some configuration options that are no longer valid with version 2 of
 the source and sink:
