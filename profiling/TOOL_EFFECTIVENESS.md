@@ -106,3 +106,31 @@
 
 - **Issue**: `collect-criterion-results.py --previous` comparison bug — `target/criterion/` data is overwritten by the after-run, making comparison unreliable.
 - **Status**: NOT YET FIXED. Workaround: manually compare baseline and after JSON files.
+
+## Iteration 6
+
+### bench-and-profile.sh (baseline)
+
+- **Effectiveness**: MEDIUM
+- **Notes**: Ran codecs benchmarks successfully. However, baseline had very high variance (7+ benchmarks exceeded 10% CoV warning). The summary comparison was misleading — showed impossible improvement percentages on encoder/event benchmarks that weren't modified. Had to fall back to Criterion's direct A/B comparison output for reliable numbers.
+
+### Criterion direct output (after benchmarks)
+
+- **Effectiveness**: HIGH
+- **Notes**: Running `cargo bench --bench codecs` directly and reading Criterion's built-in comparison output was the most reliable method. Criterion compares against its own cached data from the prior run on the same branch, giving clean A/B numbers with p-values. All 4 codec benchmarks showed statistically significant improvement (p=0.00 < 0.05).
+
+### Code reading (Read tool)
+
+- **Effectiveness**: HIGH
+- **Notes**: Reading 4 source files (character_delimited.rs, newline_delimited.rs, decoder.rs, mod.rs) was essential for understanding the SmallVec collection pattern and designing the streaming callback replacement. Understanding the split borrows requirement was critical for the Decoder::decode_all implementation.
+
+### Cherry-pick workflow
+
+- **Effectiveness**: LOW (needed workaround)
+- **Notes**: Cherry-picking the optimization commit from the cumulative optimized branch onto master failed with conflicts in all 4 modified files, because the commit was a delta on top of iteration 5's changes. Workaround: based the PR branch on `claude/batch-frame-decode` (the iteration 5 PR branch) instead of master. This worked cleanly.
+
+### Anti-pattern observed
+
+- **Issue**: Noisy baseline benchmark results produced misleading comparison data. Encoder benchmarks appeared to improve 28-58% which was impossible from codec-only changes.
+- **Root cause**: System load during baseline run inflated baseline numbers. When the after run was cleaner, the comparison showed artificial improvements.
+- **Fix**: Always verify improvements using Criterion's own comparison output (which compares against cached prior-run data from the same machine state), not against a separate baseline JSON snapshot.

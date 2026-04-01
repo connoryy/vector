@@ -75,3 +75,7 @@
 ### Decoder CharacterDelimitedDecoder::decode hot loop (was Priority 3)
 
 **Reason**: Completed in Iteration 5. Batch frame decoding with `memchr_iter` and callback-based `Decoder::decode_all()`. Improvement: 7.7-15.7% on codec benchmarks. PR #22.
+
+### SmallVec intermediate collection in decode_all_frames (was related to Priority 6)
+
+**Reason**: Completed in Iteration 6. Refactored `decode_all_frames() -> SmallVec` to `for_each_frame(FnMut(Bytes))` streaming callback. Eliminated intermediate collection of ~75K frames, improving cache locality and reducing allocation pressure. Improvement: 9.9-35.4% on codec benchmarks. PR #27.

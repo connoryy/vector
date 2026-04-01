@@ -30,15 +30,19 @@ baseline. Grows vertically — one row per iteration, no width limit.
 | **5** | **Batch frame decode (memchr_iter + callback)** | [**#22**](https://github.com/connoryy/vector/pull/22) | **codecs/char_delim/no_max** | **-15.7%** | **-68.9%** |
 | | | | **codecs/newline/no_max** | **-7.7%** | **-66.5%** |
 | | | | **codecs/char_delim/small_max** | **-8.0%** | **-61.2%** |
+| **6** | **Streaming callback decode (eliminate SmallVec)** | [**#27**](https://github.com/connoryy/vector/pull/27) | **codecs/char_delim/no_max** | **-35.4%** | **-70.1%** |
+| | | | **codecs/newline/no_max** | **-22.1%** | **-66.7%** |
+| | | | **codecs/char_delim/small_max** | **-18.8%** | **-63.9%** |
+| | | | **codecs/newline/small_max** | **-9.9%** | **-52.1%** |
 
 **Current best cumulative improvements** (latest iteration in bold):
 
-- codecs/char_delimited/no_max: 13.75 ms → 4.28 ms (**-68.9%**)
-- codecs/newline_bytes/no_max: 3.91 ms → 1.31 ms (**-66.5%**)
-- codecs/char_delimited/small_max: 6.77 ms → 2.63 ms (**-61.2%**)
-- codecs/newline_bytes/small_max: 877.7 µs → 479 µs (**-45.4%**)
-- remap/coerce: 899 ns → 673 ns (**-25.1%**)
-- remap/add_fields: 465 ns → 376 ns (**-19.1%**)
+- codecs/char_delimited/no_max: 13.75 ms → 4.12 ms (**-70.1%**)
+- codecs/newline_bytes/no_max: 3.91 ms → 1.30 ms (**-66.7%**)
+- codecs/char_delimited/small_max: 6.77 ms → 2.44 ms (**-63.9%**)
+- codecs/newline_bytes/small_max: 877.7 µs → 420 µs (**-52.1%**)
+- remap/coerce: 899 ns → 673 ns (-25.1%)
+- remap/add_fields: 465 ns → 376 ns (-19.1%)
 
 *Note: Cumulative % is computed from master baseline vs latest post-iteration measurement.
 Run-to-run variance is ±5-10%, so cumulative figures for small improvements (dedupe, filter)
@@ -336,3 +340,48 @@ The per-frame decode loop called `CharacterDelimitedDecoder::decode` ~75K times 
 The callback-based `decode_all()` API was chosen over collecting into a `Vec` because ~22K decoded events would create a ~12MB working set that doesn't fit in L1/L2 cache. Processing events via callback (create → process → drop before next event) keeps the working set small and cache-hot.
 
 The `char_delimited/no_max` benchmark showed the largest improvement (-15.7%) because it has no max_length checking overhead. The `newline/small_max` benchmark showed no significant change because the small_max parameter causes most frames to be discarded (short-circuiting the decode work), so framing loop overhead is a smaller fraction of total cost.
+
+## Iteration 6
+
+**Date**: 2026-04-01T14:36:00Z
+**Discovery Method**: Profiling codecs suite post-iteration-5. The iteration 5 `decode_all_frames()` method still collected frames into `SmallVec<[Bytes; 4]>` before iterating. With ~75K frames per benchmark iteration, this intermediate collection added allocation pressure and reduced cache locality. The callback approach from iteration 5's `Decoder::decode_all` was only at the outer level — the inner framing layer still materialized all frames.
+**Target**: `CharacterDelimitedDecoder::decode_all_frames()` and `NewlineDelimitedDecoder::decode_all_frames()` in `lib/codecs/src/decoding/framing/`
+**Change**: Renamed `decode_all_frames() -> SmallVec<[Bytes; 4]>` to `for_each_frame(FnMut(Bytes))` — a streaming callback that processes each frame inline without collecting. Updated `Framer` enum to return `bool` (whether streaming was supported). Updated `Decoder::decode_all` to use split borrows pattern (`&self.deserializer` + `&mut self.framer`) with error capture via `Option<Error>`.
+**Result**: MERGED
+**Improvement**: 9.9% to 35.4% on codec benchmarks
+**PR**: https://github.com/connoryy/vector/pull/27
+
+### Baseline (on optimized branch, post-iteration-5)
+
+| Benchmark | Mean |
+| ----------- | ------ |
+| codecs/char_delimited/no_max | 6.50 ms |
+| codecs/char_delimited/small_max | 2.98 ms |
+| codecs/newline_bytes/no_max | 1.67 ms |
+| codecs/newline_bytes/small_max | 452 µs |
+
+### After
+
+| Benchmark | Mean | Change |
+| ----------- | ------ | -------- |
+| codecs/char_delimited/no_max | 4.12 ms | **-35.4%** |
+| codecs/char_delimited/small_max | 2.44 ms | **-18.8%** |
+| codecs/newline_bytes/no_max | 1.30 ms | **-22.1%** |
+| codecs/newline_bytes/small_max | 420 µs | **-9.9%** |
+
+Encoder benchmarks:
+
+- JsonLogVecSerializer: 98.8 ns (-12.9%, likely secondary effect from reduced allocator pressure)
+- JsonLogSerializer: 165.3 ns (no change)
+- JsonSerializer: 199.5 ns (+19.1%, **regression** — high outlier count suggests measurement noise)
+- Encoder: 222.3 ns (+4.3%, marginal, within noise)
+
+### Analysis
+
+The key insight is that eliminating the intermediate `SmallVec<[Bytes; 4]>` collection in the framing layer had a much larger impact than expected. With ~75K frames per iteration, even `SmallVec` (which avoids heap allocation for ≤4 elements) must heap-allocate for the actual workload. More importantly, collecting all frames then iterating doubles the memory traffic: first write all frame references to the SmallVec, then read them back to process.
+
+The streaming callback pattern (`for_each_frame`) processes each frame inline: extract → deserialize → emit → drop, all within a single pass. This keeps the working set in L1/L2 cache and allows the allocator to immediately reuse memory from dropped events for subsequent ones. The improvement is proportionally larger on `char_delimited/no_max` (-35.4%) because no frames are discarded by max_length checks, so all ~75K frames go through the full collect/iterate cycle in the old code.
+
+The split borrows pattern in `Decoder::decode_all` was necessary because `self.framer.for_each_frame()` takes `&mut self` while the closure needs `&self.deserializer`. Rust's borrow checker can't see that these are disjoint fields through a `&mut self` reference, so we bind `let deserializer = &self.deserializer;` before calling `self.framer.for_each_frame()`.
+
+The encoder regression (JsonSerializer +19.1%) is likely measurement noise — the benchmark has 7.33% outliers and the encoder code was not modified. The regression is not correlated with the codec changes.

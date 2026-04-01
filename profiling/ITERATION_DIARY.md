@@ -185,3 +185,39 @@
 - String::clone (KeyString) at 9.8% — key cloning during event construction is a significant cost
 - Event drop path at ~39.5% — BTreeMap/Arc/Vec destruction dominates CPU, but very hard to optimize without fundamental data model changes
 - `call_mut` overhead in new batch path — the Framer enum dispatch adds overhead; could be mitigated with monomorphization or direct struct access
+
+### Iteration 6 — 2026-04-01T14:36:00Z
+
+**Target**: SmallVec intermediate collection in `decode_all_frames` — refactor to streaming `for_each_frame` callback
+**Outcome**: MERGED (PR #27)
+
+**Tools Used** (in order, with usefulness rating):
+
+1. bench-and-profile.sh (baseline) — ran codecs benchmarks, showed baseline numbers for the 4 codec benchmarks — Y useful
+2. Read character_delimited.rs, newline_delimited.rs, mod.rs, decoder.rs — understood the existing `decode_all_frames` → `SmallVec` → iterate pattern — Y useful
+3. Criterion direct output (after) — confirmed 9.9-35.4% improvement on all 4 codec benchmarks, all statistically significant at p<0.05 — Y useful
+
+**Time Breakdown**:
+
+- Benchmarks: ~6 turns (two bench runs)
+- Code reading: 4 turns (framing files, decoder, mod.rs)
+- Analysis: 2 turns (understanding SmallVec overhead, cache locality implications)
+- Writing code: 4 turns (for_each_frame in character_delimited, delegation in newline_delimited, Framer enum, Decoder::decode_all split borrows)
+- Building/testing: 3 turns (fmt, clippy, cargo test)
+- Git/PR: 6 turns (commit, push, cherry-pick with conflict resolution, create PR)
+
+**Difficulties**:
+
+- Cherry-pick conflicts: The iteration 6 commit couldn't cherry-pick cleanly onto master because it depends on iteration 5's batch frame decode changes. Had to base the PR branch on `claude/batch-frame-decode` instead.
+- Noisy baseline: The bench-and-profile baseline had very high variance (7+ benchmarks exceeded 10% CoV), making the summary comparison misleading. Had to use Criterion's direct A/B comparison output for reliable numbers.
+- Context window exhaustion: This iteration was split across two sessions due to context window limits. The first session completed through commit + push; the second session handled PR creation and documentation.
+
+**What Would Have Helped**:
+
+- A script to automate the cherry-pick-with-dependency-chain workflow for PR branch creation
+- The bench-and-profile comparison being based on Criterion's own A/B comparison rather than comparing two independent JSON snapshots
+
+**Leads Discovered**:
+
+- Remaining codec hotspots are dominated by external crate code (BTreeMap ops, KeyString clones) and structural issues (event drop path) — diminishing returns on further codec-focused optimizations
+- The encoder regression (JsonSerializer +19.1%) warrants investigation if it persists across runs — could indicate a real cache interaction effect from the changed memory access patterns
