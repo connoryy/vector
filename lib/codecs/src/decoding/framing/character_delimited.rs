@@ -1,6 +1,5 @@
 use bytes::{Buf, Bytes, BytesMut};
 use memchr::{memchr, memchr_iter};
-use smallvec::SmallVec;
 use tokio_util::codec::Decoder;
 use tracing::{trace, warn};
 use vector_config::configurable_component;
@@ -104,7 +103,7 @@ impl CharacterDelimitedDecoder {
 }
 
 impl CharacterDelimitedDecoder {
-    /// Decode all complete frames from the buffer in one batch.
+    /// Process all complete frames from the buffer, calling `f` for each frame.
     ///
     /// This is more efficient than calling `decode`/`decode_eof` in a loop
     /// because it:
@@ -113,24 +112,28 @@ impl CharacterDelimitedDecoder {
     /// - Freezes the buffer once and uses `Bytes::slice()` for each frame
     ///   instead of per-frame `BytesMut::split_to().freeze()`
     /// - Eliminates per-frame function call overhead through trait dispatch
+    /// - Avoids collecting all frames into an intermediate collection — each
+    ///   frame is passed directly to the callback, keeping memory usage O(1)
     ///
     /// The buffer is fully consumed (including any trailing data after the
     /// last delimiter, treated as the final frame per EOF semantics).
     #[inline]
-    pub fn decode_all_frames(&self, buf: &mut BytesMut) -> SmallVec<[Bytes; 4]> {
+    pub fn for_each_frame<F>(&self, buf: &mut BytesMut, mut f: F)
+    where
+        F: FnMut(Bytes),
+    {
         let max_length = self.max_length;
         // Freeze the entire buffer into a single Bytes. All per-frame slices
         // share this one reference-counted allocation.
         let frozen = buf.split().freeze();
         let len = frozen.len();
 
-        let mut frames = SmallVec::new();
         let mut start = 0;
 
         for pos in memchr_iter(self.delimiter, &frozen) {
             let frame_len = pos - start;
             if frame_len <= max_length {
-                frames.push(frozen.slice(start..pos));
+                f(frozen.slice(start..pos));
             } else {
                 warn!(
                     message = "Discarding frame larger than max_length.",
@@ -145,7 +148,7 @@ impl CharacterDelimitedDecoder {
         if start < len {
             let remaining = len - start;
             if remaining <= max_length {
-                frames.push(frozen.slice(start..));
+                f(frozen.slice(start..));
             } else {
                 warn!(
                     message = "Discarding frame larger than max_length.",
@@ -154,8 +157,6 @@ impl CharacterDelimitedDecoder {
                 );
             }
         }
-
-        frames
     }
 }
 

@@ -199,18 +199,31 @@ pub enum Framer {
 }
 
 impl Framer {
-    /// Decode all frames from the buffer in a single batch.
+    /// Process all frames from the buffer via a callback.
     ///
-    /// For framers that support batch decoding (`CharacterDelimited` and
+    /// For framers that support streaming decode (`CharacterDelimited` and
     /// `NewlineDelimited`), this uses `memchr_iter` for a single SIMD pass
     /// and `Bytes::slice()` to avoid per-frame `split_to`/`freeze` overhead.
+    /// Frames are passed directly to the callback without intermediate
+    /// collection, keeping memory usage O(1) instead of O(N) where N is the
+    /// number of frames.
     ///
-    /// Other framers fall back to the standard `decode_eof` loop.
-    pub fn decode_all_frames(&mut self, buf: &mut BytesMut) -> Option<SmallVec<[Bytes; 4]>> {
+    /// Returns `true` if this framer supports streaming decode (callback was
+    /// used), `false` otherwise (caller should fall back to `decode_eof` loop).
+    pub fn for_each_frame<F>(&mut self, buf: &mut BytesMut, f: F) -> bool
+    where
+        F: FnMut(Bytes),
+    {
         match self {
-            Framer::CharacterDelimited(framer) => Some(framer.decode_all_frames(buf)),
-            Framer::NewlineDelimited(framer) => Some(framer.decode_all_frames(buf)),
-            _ => None, // fallback: caller should use decode_eof loop
+            Framer::CharacterDelimited(framer) => {
+                framer.for_each_frame(buf, f);
+                true
+            }
+            Framer::NewlineDelimited(framer) => {
+                framer.for_each_frame(buf, f);
+                true
+            }
+            _ => false, // fallback: caller should use decode_eof loop
         }
     }
 }
