@@ -71,6 +71,7 @@ mod parser;
 mod partial_events_merger;
 mod path_helpers;
 mod pod_metadata_annotator;
+#[cfg(test)]
 mod test;
 mod transform_utils;
 mod util;
@@ -693,7 +694,7 @@ impl Source {
         })
     }
 
-    #[cfg(any(test, feature = "all-integration-tests"))]
+    #[cfg(test)]
     async fn new_test(
         config: &Config,
         globals: &GlobalOptions,
@@ -755,6 +756,7 @@ impl Source {
             max_read_bytes: config.max_read_bytes,
             oldest_first: config.oldest_first,
             max_line_bytes: config.max_line_bytes,
+            max_merged_line_bytes: config.max_merged_line_bytes,
             fingerprint_lines: config.fingerprint_lines,
             glob_minimum_cooldown,
             use_apiserver_cache: config.use_apiserver_cache,
@@ -762,6 +764,7 @@ impl Source {
             delay_deletion,
             include_file_metric_tag: config.internal_metrics.include_file_tag,
             rotate_wait: config.rotate_wait,
+            insert_namespace_fields: config.insert_namespace_fields,
             acknowledgements,
             maybe_logs_dir: Some(logs_dir),
         })

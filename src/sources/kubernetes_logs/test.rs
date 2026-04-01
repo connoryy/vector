@@ -2,13 +2,13 @@
 mod tests {
     use bytes::Bytes;
     use chrono::Utc;
-    use futures::{pin_mut, FutureExt, StreamExt};
+    use futures::{FutureExt, StreamExt, pin_mut};
     use http_1::{Request, Response};
     use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
     use kube::{
+        Client,
         api::{ListMeta, ObjectList, TypeMeta, WatchEvent},
         client::Body,
-        Client,
     };
     use similar_asserts::assert_eq;
     use std::{
@@ -18,27 +18,27 @@ mod tests {
         path::{Path, PathBuf},
     };
     use tempfile::tempdir;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
     use tower_test::mock::{Handle, SendResponse};
     use vector_lib::{
         codecs::BytesDeserializerConfig,
         config::{
-            log_schema, AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace,
-            SourceAcknowledgementsConfig, SourceOutput,
+            AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace,
+            SourceAcknowledgementsConfig, SourceOutput, log_schema,
         },
         id::ComponentKey,
-        lookup::{owned_value_path, OwnedTargetPath},
+        lookup::{OwnedTargetPath, owned_value_path},
         schema::Definition,
     };
-    use vrl::value::{kind::Collection, Kind};
+    use vrl::value::{Kind, kind::Collection};
 
     use crate::{
+        SourceSender,
         config::{SourceConfigTest, SourceContext},
         event::{Event, EventStatus},
         extra_context::ExtraContext,
         shutdown::ShutdownSignal,
-        test_util::components::{assert_source_compliance, SOURCE_TAGS},
-        SourceSender,
+        test_util::components::{SOURCE_TAGS, assert_source_compliance},
     };
 
     use super::super::Config;
@@ -700,7 +700,13 @@ mod tests {
     ) -> i32 {
         let timestamp = Utc::now();
         // bump resource_version once we're done with Init so we actually pick up the Apply
-        let mode = if request_uri == "/api/v1/pods?&fieldSelector=spec.nodeName%3Dtest&labelSelector=vector.dev%2Fexclude%21%3Dtrue&limit=500" { "list" } else { "watch" };
+        let mode = if request_uri
+            == "/api/v1/pods?&fieldSelector=spec.nodeName%3Dtest&labelSelector=vector.dev%2Fexclude%21%3Dtrue&limit=500"
+        {
+            "list"
+        } else {
+            "watch"
+        };
         let resource_version = format!("{}", if mode == "list" { 0 } else { 1 });
         let pod: Pod = serde_json::from_value(serde_json::json!({
             "apiVersion": "v1",
@@ -1044,8 +1050,11 @@ mod tests {
                             expire_metrics_secs: Default::default(),
                             expire_metrics_per_metric_set: Default::default(),
                             wildcard_matching: Default::default(),
+                            buffer_utilization_ewma_half_life_seconds: Default::default(),
+                            latency_ewma_alpha: Default::default(),
+                            metrics_storage_refresh_period: Default::default(),
                         },
-                        shutdown: shutdown,
+                        shutdown,
                         out: tx,
                         proxy: Default::default(),
                         acknowledgements: acks,
@@ -1053,6 +1062,7 @@ mod tests {
                         schema: Default::default(),
                         extra_context: ExtraContext::single_value(logs_dir.to_owned()),
                         enrichment_tables: Default::default(),
+                        metrics_storage: Default::default(),
                     },
                     client,
                 )
