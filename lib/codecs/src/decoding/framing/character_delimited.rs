@@ -1,5 +1,6 @@
 use bytes::{Buf, Bytes, BytesMut};
-use memchr::memchr;
+use memchr::{memchr, memchr_iter};
+use smallvec::SmallVec;
 use tokio_util::codec::Decoder;
 use tracing::{trace, warn};
 use vector_config::configurable_component;
@@ -99,6 +100,62 @@ impl CharacterDelimitedDecoder {
     /// Returns the maximum frame length when decoding.
     pub const fn max_length(&self) -> usize {
         self.max_length
+    }
+}
+
+impl CharacterDelimitedDecoder {
+    /// Decode all complete frames from the buffer in one batch.
+    ///
+    /// This is more efficient than calling `decode`/`decode_eof` in a loop
+    /// because it:
+    /// - Uses `memchr_iter` for a single SIMD pass over the entire buffer
+    ///   instead of restarting `memchr` per frame
+    /// - Freezes the buffer once and uses `Bytes::slice()` for each frame
+    ///   instead of per-frame `BytesMut::split_to().freeze()`
+    /// - Eliminates per-frame function call overhead through trait dispatch
+    ///
+    /// The buffer is fully consumed (including any trailing data after the
+    /// last delimiter, treated as the final frame per EOF semantics).
+    #[inline]
+    pub fn decode_all_frames(&self, buf: &mut BytesMut) -> SmallVec<[Bytes; 4]> {
+        let max_length = self.max_length;
+        // Freeze the entire buffer into a single Bytes. All per-frame slices
+        // share this one reference-counted allocation.
+        let frozen = buf.split().freeze();
+        let len = frozen.len();
+
+        let mut frames = SmallVec::new();
+        let mut start = 0;
+
+        for pos in memchr_iter(self.delimiter, &frozen) {
+            let frame_len = pos - start;
+            if frame_len <= max_length {
+                frames.push(frozen.slice(start..pos));
+            } else {
+                warn!(
+                    message = "Discarding frame larger than max_length.",
+                    buf_len = frame_len,
+                    max_length = max_length
+                );
+            }
+            start = pos + 1;
+        }
+
+        // Handle trailing data after the last delimiter (EOF semantics).
+        if start < len {
+            let remaining = len - start;
+            if remaining <= max_length {
+                frames.push(frozen.slice(start..));
+            } else {
+                warn!(
+                    message = "Discarding frame larger than max_length.",
+                    buf_len = remaining,
+                    max_length = max_length
+                );
+            }
+        }
+
+        frames
     }
 }
 

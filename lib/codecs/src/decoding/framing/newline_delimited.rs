@@ -1,4 +1,5 @@
 use bytes::{Bytes, BytesMut};
+use smallvec::SmallVec;
 use tokio_util::codec::Decoder;
 use vector_config::configurable_component;
 
@@ -81,6 +82,13 @@ impl NewlineDelimitedDecoder {
         Self(CharacterDelimitedDecoder::new_with_max_length(
             b'\n', max_length,
         ))
+    }
+
+    /// Decode all complete frames from the buffer in one batch.
+    /// Delegates to [`CharacterDelimitedDecoder::decode_all_frames`].
+    #[inline]
+    pub fn decode_all_frames(&self, buf: &mut BytesMut) -> SmallVec<[Bytes; 4]> {
+        self.0.decode_all_frames(buf)
     }
 }
 
