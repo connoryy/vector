@@ -18,7 +18,7 @@ should optimize performance and throughput, but not at the expense of causing
 errors. Unfortunately, AWS-hosted Elasticsearch does not support compression,
 and therefore we've made this feature opt-in.
 
-### Upgrade Guide
+## Upgrade Guide
 
 Upgrading is easy. Add the following if you want to enabled Gzip compression:
 

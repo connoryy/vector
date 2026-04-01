@@ -15,7 +15,7 @@ The sections below show you how to administer your Vector instance—start, stop
 * [Docker](#docker)
 * [Kubernetes with Helm](#helm)
 
-### Vector executable
+## Vector executable
 
 To manage the Vector executable directly, without a process manager:
 
