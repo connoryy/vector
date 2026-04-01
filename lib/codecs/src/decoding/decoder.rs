@@ -105,9 +105,7 @@ impl Decoder {
             }
         } else {
             // Fallback: standard decode_eof loop
-            while let Some(d) =
-                <Self as tokio_util::codec::Decoder>::decode_eof(self, buf)?
-            {
+            while let Some(d) = <Self as tokio_util::codec::Decoder>::decode_eof(self, buf)? {
                 f(d);
             }
         }
