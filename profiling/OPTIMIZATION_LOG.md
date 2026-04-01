@@ -9,7 +9,7 @@ within a single bench run). The "cumulative" column shows total improvement vs t
 baseline. Grows vertically — one row per iteration, no width limit.
 
 | Iter | Optimization | PR | Key benchmark | Delta | Cumulative vs master |
-|------|-------------|-----|---------------|-------|---------------------|
+| ------ | ------------- | ----- | --------------- | ------- | --------------------- |
 | 0a | VrlTarget Arc reuse (decompose/recompose) | [#7](https://github.com/connoryy/vector/pull/7) | remap/add_fields | -31.4% | -31.4% |
 | | | | remap/parse_json | -31.0% | -31.0% |
 | | | | remap/coerce | -32.2% | -32.2% |
@@ -27,12 +27,16 @@ baseline. Grows vertically — one row per iteration, no width limit.
 | **4** | **Direct LogEvent construction** | [**#21**](https://github.com/connoryy/vector/pull/21) | **codecs/newline/no_max** | **-23.1%** | **-63.9%** |
 | | | | **codecs/char_delim/no_max** | **-19.8%** | **-64.0%** |
 | | | | **codecs/newline/small_max** | **-9.7%** | **-44.8%** |
+| **5** | **Batch frame decode (memchr_iter + callback)** | [**#22**](https://github.com/connoryy/vector/pull/22) | **codecs/char_delim/no_max** | **-15.7%** | **-68.9%** |
+| | | | **codecs/newline/no_max** | **-7.7%** | **-66.5%** |
+| | | | **codecs/char_delim/small_max** | **-8.0%** | **-61.2%** |
 
 **Current best cumulative improvements** (latest iteration in bold):
-- codecs/char_delimited/no_max: 13.75 ms → 4.95 ms (**-64.0%**)
-- codecs/newline_bytes/no_max: 3.91 ms → 1.41 ms (**-63.9%**)
-- codecs/char_delimited/small_max: 6.77 ms → 2.87 ms (**-57.6%**)
-- codecs/newline_bytes/small_max: 877.7 µs → 484 µs (**-44.8%**)
+
+- codecs/char_delimited/no_max: 13.75 ms → 4.28 ms (**-68.9%**)
+- codecs/newline_bytes/no_max: 3.91 ms → 1.31 ms (**-66.5%**)
+- codecs/char_delimited/small_max: 6.77 ms → 2.63 ms (**-61.2%**)
+- codecs/newline_bytes/small_max: 877.7 µs → 479 µs (**-45.4%**)
 - remap/coerce: 899 ns → 673 ns (**-25.1%**)
 - remap/add_fields: 465 ns → 376 ns (**-19.1%**)
 
@@ -52,7 +56,7 @@ per-event savings well above the noise floor.*
 **PR**: https://github.com/connoryy/vector/pull/7
 
 | Benchmark | Before | After | Change |
-|-----------|--------|-------|--------|
+| ----------- | -------- | ------- | -------- |
 | remap/add_fields | 465 ns | 319 ns | **-31.4%** |
 | remap/parse_json | 500 ns | 345 ns | **-31.1%** |
 | remap/coerce | 899 ns | 610 ns | **-32.2%** |
@@ -68,7 +72,7 @@ per-event savings well above the noise floor.*
 **PR**: https://github.com/connoryy/vector/pull/13
 
 | Benchmark | Before | After | Change |
-|-----------|--------|-------|--------|
+| ----------- | -------- | ------- | -------- |
 | filter/always_pass | 25.0 µs | 24.2 µs | **-3.3%** |
 | filter/always_fail | 18.6 µs | 17.5 µs | **-5.5%** |
 | dedupe/field_ignore_message | 59.5 µs | 58.6 µs | **-1.5%** |
@@ -84,8 +88,9 @@ per-event savings well above the noise floor.*
 **PR**: https://github.com/connoryy/vector/pull/18
 
 ### Baseline
+
 | Benchmark | Mean |
-|-----------|------|
+| ----------- | ------ |
 | remap/add_fields | 421.0 ns |
 | remap/parse_json | 441.2 ns |
 | remap/coerce | 677.1 ns |
@@ -100,8 +105,9 @@ per-event savings well above the noise floor.*
 | filter/transform_always_fail | 16.3 µs |
 
 ### After
+
 | Benchmark | Mean | Change |
-|-----------|------|--------|
+| ----------- | ------ | -------- |
 | remap/add_fields | 338.7 ns | -19.5% |
 | remap/parse_json | 415.5 ns | -5.8% |
 | remap/coerce | 660.3 ns | -2.5% |
@@ -116,6 +122,7 @@ per-event savings well above the noise floor.*
 | filter/transform_always_fail | 16.7 µs | +2.3% |
 
 ### Analysis
+
 The default schema definition is created on every EventMetadata::default() → every LogEvent creation. It always produces the identical value (Kind::any() with both Legacy/Vector namespaces). The prior code allocated a new Arc<Definition> with BTreeSet, BTreeMap, and Kind objects each time. By caching in a LazyLock static, we eliminate these allocations entirely.
 
 The large improvements on decoder benchmarks (22-35%) are proportional because each decoder iteration creates ~75K events (one per delimiter match in Moby Dick). The remap and event benchmarks also benefit significantly because event creation overhead is a large fraction of their total cost.
@@ -133,8 +140,9 @@ The small regression on filter/transform_always_fail (+2.3%) is within noise (no
 **PR**: https://github.com/connoryy/vector/pull/19
 
 ### Baseline (on optimized branch, post-iteration-1)
+
 | Benchmark | Mean |
-|-----------|------|
+| ----------- | ------ |
 | remap/add_fields | 371.6 ns |
 | remap/parse_json | 439.0 ns |
 | remap/coerce | 677.2 ns |
@@ -156,8 +164,9 @@ The small regression on filter/transform_always_fail (+2.3%) is within noise (no
 | reduce/proof_of_concept | 82.4 µs |
 
 ### After
+
 | Benchmark | Mean | Change |
-|-----------|------|--------|
+| ----------- | ------ | -------- |
 | remap/add_fields | 370.1 ns | -0.4% |
 | remap/parse_json | 443.3 ns | +1.0% |
 | remap/coerce | 656.7 ns | -3.0% |
@@ -179,6 +188,7 @@ The small regression on filter/transform_always_fail (+2.3%) is within noise (no
 | reduce/proof_of_concept | 83.0 µs | +0.7% |
 
 ### Analysis
+
 `Uuid::new_v4()` uses the ChaCha12 CSPRNG which appeared at 4.5% in event profiling. The UUID is generated eagerly on every `EventMetadata::default()` call (every event creation) but `source_event_id` is only accessed during protobuf serialization (for gRPC inter-process communication) and metadata merge — zero usage in `src/` (no sources, transforms, or sinks read it).
 
 The large improvements on decoder benchmarks (11-43%) and encoder benchmarks (21-26%) are because these create many events per iteration. The transform benchmarks also improved significantly (24-38% on filter and some dedupe variants). Remap benchmarks show minimal change because VRL execution time dominates event creation overhead.
@@ -196,8 +206,9 @@ Some benchmarks show surprisingly large improvements (e.g., dedupe/field_match_m
 **PR**: https://github.com/connoryy/vector/pull/20
 
 ### Baseline (on optimized branch, post-iteration-2)
+
 | Benchmark | Mean |
-|-----------|------|
+| ----------- | ------ |
 | remap/add_fields | 375.6 ns |
 | remap/parse_json | 448.7 ns |
 | remap/coerce | 672.6 ns |
@@ -220,8 +231,9 @@ Some benchmarks show surprisingly large improvements (e.g., dedupe/field_match_m
 | reduce/proof_of_concept | 84.2 µs |
 
 ### After
+
 | Benchmark | Mean | Change |
-|-----------|------|--------|
+| ----------- | ------ | -------- |
 | remap/add_fields | 375.6 ns | +0.0% |
 | remap/parse_json | 448.7 ns | +0.0% |
 | remap/coerce | 672.6 ns | +0.0% |
@@ -244,6 +256,7 @@ Some benchmarks show surprisingly large improvements (e.g., dedupe/field_match_m
 | reduce/proof_of_concept | 83.5 µs | -0.8% |
 
 ### Analysis
+
 The codec benchmarks show 15-27% improvement because each iteration creates ~75K events via `LogEvent::default()` → `EventMetadata::default()`. In the codec decode path (`BytesDeserializer::parse_single`), the EventMetadata is **never mutated** — only the LogEvent's inner value is modified via `insert()` (PathPrefix::Event branch). So these events carry a zero-allocation shared reference to the cached static `Arc<Inner>` for their entire lifetime.
 
 The event/rename_key benchmarks show no significant change because they create events and immediately mutate them (triggering the COW copy), so the total allocation cost is roughly the same as before — just deferred from creation to first mutation.
@@ -263,16 +276,18 @@ The remap benchmarks show no change because VRL execution dominates event creati
 **PR**: https://github.com/connoryy/vector/pull/21
 
 ### Baseline (on optimized branch, post-iteration-3)
+
 | Benchmark | Mean |
-|-----------|------|
+| ----------- | ------ |
 | codecs/char_delimited/no_max | 6.17 ms |
 | codecs/char_delimited/small_max | 3.45 ms |
 | codecs/newline_bytes/no_max | 1.83 ms |
 | codecs/newline_bytes/small_max | 536 µs |
 
 ### After
+
 | Benchmark | Mean | Change |
-|-----------|------|--------|
+| ----------- | ------ | -------- |
 | codecs/char_delimited/no_max | 4.95 ms | **-19.8%** |
 | codecs/char_delimited/small_max | 2.87 ms | **-16.8%** |
 | codecs/newline_bytes/no_max | 1.41 ms | **-23.1%** |
@@ -281,4 +296,43 @@ The remap benchmarks show no change because VRL execution dominates event creati
 No regressions in remap, transform, or event benchmarks.
 
 ### Analysis
+
 The bytes deserializer creates one LogEvent per decoded frame (~75K per codec benchmark iteration). The original path created an empty LogEvent then inserted the message field, which involved: (1) `value_mut()` triggering `Arc::make_mut` COW check, (2) VRL's recursive `Value::insert` for a single-segment path, (3) `KeyString::from()` allocation for the field name each time. The new path pre-populates the ObjectMap and constructs the LogEvent in one step, eliminating all three costs. The cached `LazyLock<KeyString>` avoids the per-event string allocation.
+
+## Iteration 5
+
+**Date**: 2026-04-01T10:38:00Z
+**Discovery Method**: Profiling codecs suite post-iteration-4. `CharacterDelimitedDecoder::decode` at 13.0% of codecs CPU, `malloc` at 7.9%, `sdallocx` at 7.4%+3.5%, `GroupedTraceableAllocator` at 5.1%, `String::clone` (KeyString) at 9.8%, `BTreeMap::insert` at 7.1%, event drop path at ~39.5%. The framing loop was the top single-function hotspot.
+**Target**: `CharacterDelimitedDecoder::decode` per-frame trait dispatch loop in `lib/codecs/src/decoding/framing/character_delimited.rs` and `Decoder::handle_framing_result` in `lib/codecs/src/decoding/decoder.rs`
+**Change**: Batch frame decoding with `memchr_iter` — scan entire buffer in a single pass, extract frames via `Bytes::slice()` (zero-copy refcount-sharing). Added `decode_all_frames()` to `CharacterDelimitedDecoder`, `NewlineDelimitedDecoder`, and `Framer` enum. Added `Decoder::decode_all()` with callback-based API (`FnMut(DecodedFrame)`) instead of collecting into Vec to preserve cache-friendly memory access patterns.
+**Result**: MERGED
+**Improvement**: 7.7% to 15.7% on codec benchmarks
+**PR**: https://github.com/connoryy/vector/pull/22
+
+### Baseline (on optimized branch, post-iteration-4)
+
+| Benchmark | Mean |
+| ----------- | ------ |
+| codecs/char_delimited/no_max | 5.08 ms |
+| codecs/char_delimited/small_max | 2.86 ms |
+| codecs/newline_bytes/no_max | 1.42 ms |
+| codecs/newline_bytes/small_max | 474.87 µs |
+
+### After
+
+| Benchmark | Mean | Change |
+| ----------- | ------ | -------- |
+| codecs/char_delimited/no_max | 4.28 ms | **-15.7%** |
+| codecs/char_delimited/small_max | 2.63 ms | **-8.0%** |
+| codecs/newline_bytes/no_max | 1.31 ms | **-7.7%** |
+| codecs/newline_bytes/small_max | 479.34 µs | +1.7% (noise) |
+
+No regressions in remap or transform benchmarks.
+
+### Analysis
+
+The per-frame decode loop called `CharacterDelimitedDecoder::decode` ~75K times per benchmark iteration, each involving: (1) `memchr` to find the next delimiter, (2) `BytesMut::split_to().freeze()` to extract the frame, (3) trait dispatch through `tokio_util::codec::Decoder` back to the caller. The batch path replaces this with a single `memchr_iter` scan that finds all delimiters in one SIMD-accelerated pass, extracting frames via `Bytes::slice()` which shares the same underlying allocation.
+
+The callback-based `decode_all()` API was chosen over collecting into a `Vec` because ~22K decoded events would create a ~12MB working set that doesn't fit in L1/L2 cache. Processing events via callback (create → process → drop before next event) keeps the working set small and cache-hot.
+
+The `char_delimited/no_max` benchmark showed the largest improvement (-15.7%) because it has no max_length checking overhead. The `newline/small_max` benchmark showed no significant change because the small_max parameter causes most frames to be discarded (short-circuiting the decode work), so framing loop overhead is a smaller fraction of total cost.
