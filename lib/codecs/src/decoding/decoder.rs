@@ -88,8 +88,10 @@ impl Decoder {
     /// Decode all frames from the buffer, calling `f` for each decoded frame.
     ///
     /// For supported framers (character-delimited, newline-delimited), this
-    /// uses batch framing with `memchr_iter` for better throughput. Falls
-    /// back to the standard `decode_eof` loop for other framers.
+    /// uses streaming decode with `memchr_iter` for better throughput. Frames
+    /// are passed directly to the deserializer without intermediate collection,
+    /// keeping memory usage O(1) instead of O(N) where N is the frame count.
+    /// Falls back to the standard `decode_eof` loop for other framers.
     ///
     /// Processing events via callback (instead of collecting into a Vec)
     /// preserves the memory access pattern of the per-frame decode loop:
@@ -99,11 +101,34 @@ impl Decoder {
     where
         F: FnMut(DecodedFrame),
     {
-        if let Some(frames) = self.framer.decode_all_frames(buf) {
-            for frame in frames {
-                f(self.deserializer_parse(frame)?);
+        // Split borrows: framer needs &mut, deserializer_parse needs &self fields.
+        // Extract references to avoid conflicting borrows.
+        let deserializer = &self.deserializer;
+        let log_namespace = self.log_namespace;
+        let mut err: Option<Error> = None;
+
+        let handled = self.framer.for_each_frame(buf, |frame| {
+            if err.is_some() {
+                return;
             }
-        } else {
+            let byte_size = frame.len();
+            match deserializer
+                .parse(frame, log_namespace)
+                .map(|events| (events, byte_size))
+            {
+                Ok(decoded) => f(decoded),
+                Err(error) => {
+                    emit(DecoderDeserializeError { error: &error });
+                    err = Some(Error::ParsingError(error));
+                }
+            }
+        });
+
+        if let Some(e) = err {
+            return Err(e);
+        }
+
+        if !handled {
             // Fallback: standard decode_eof loop
             while let Some(d) = <Self as tokio_util::codec::Decoder>::decode_eof(self, buf)? {
                 f(d);
