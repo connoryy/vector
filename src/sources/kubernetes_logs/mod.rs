@@ -21,17 +21,20 @@ use kube::{
 };
 use lifecycle::Lifecycle;
 use serde_with::serde_as;
+use tokio::sync::oneshot;
 use vector_lib::{
     EstimatedJsonEncodedSizeOf, TimeZone,
     codecs::{BytesDeserializer, BytesDeserializerConfig},
     config::{LegacyKey, LogNamespace},
     configurable::configurable_component,
+    event::{BatchNotifier, BatchStatus},
     file_source::file_server::{
         FileServer, Line, Shutdown as FileServerShutdown, calculate_ignore_before,
     },
     file_source_common::{
-        Checkpointer, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
+        Checkpointer, FileFingerprint, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
     },
+    finalizer::OrderedFinalizer,
     internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol},
     lookup::{OwnedTargetPath, lookup_v2::OptionalTargetPath, owned_value_path, path},
 };
@@ -41,8 +44,8 @@ use crate::{
     SourceSender,
     built_info::{PKG_NAME, PKG_VERSION},
     config::{
-        ComponentKey, DataType, GenerateConfig, GlobalOptions, SourceConfig, SourceContext,
-        SourceOutput, log_schema,
+        ComponentKey, DataType, GenerateConfig, GlobalOptions, SourceAcknowledgementsConfig,
+        SourceConfig, SourceContext, SourceOutput, log_schema,
     },
     event::Event,
     internal_events::{
@@ -52,6 +55,7 @@ use crate::{
         KubernetesLogsPodInfo, StreamClosedError,
     },
     kubernetes::{custom_reflector, meta_cache::MetaCache},
+    serde::bool_or_struct,
     shutdown::ShutdownSignal,
     sources,
     sources::kubernetes_logs::partial_events_merger::merge_partial_events,
@@ -66,6 +70,8 @@ mod parser;
 mod partial_events_merger;
 mod path_helpers;
 mod pod_metadata_annotator;
+#[cfg(test)]
+mod test;
 mod transform_utils;
 mod util;
 
@@ -74,6 +80,13 @@ use self::{
     node_metadata_annotator::NodeMetadataAnnotator, parser::Parser,
     pod_metadata_annotator::PodMetadataAnnotator,
 };
+
+/// Entry tracked by the finalizer for acknowledgement-based checkpointing.
+#[derive(Debug)]
+struct FinalizerEntry {
+    file_id: FileFingerprint,
+    offset: u64,
+}
 
 /// The `self_node_name` value env var key.
 const SELF_NODE_NAME_ENV_KEY: &str = "VECTOR_SELF_NODE_NAME";
@@ -278,6 +291,10 @@ pub struct Config {
     #[configurable(metadata(docs::type_unit = "seconds"))]
     #[serde(default = "default_rotate_wait", rename = "rotate_wait_secs")]
     rotate_wait: Duration,
+
+    #[configurable(derived)]
+    #[serde(default, deserialize_with = "bool_or_struct")]
+    acknowledgements: SourceAcknowledgementsConfig,
 }
 
 const fn default_read_from() -> ReadFromConfig {
@@ -326,6 +343,7 @@ impl Default for Config {
             log_namespace: None,
             internal_metrics: Default::default(),
             rotate_wait: default_rotate_wait(),
+            acknowledgements: Default::default(),
         }
     }
 }
@@ -335,7 +353,8 @@ impl Default for Config {
 impl SourceConfig for Config {
     async fn build(&self, cx: SourceContext) -> crate::Result<sources::Source> {
         let log_namespace = cx.log_namespace(self.log_namespace);
-        let source = Source::new(self, &cx.globals, &cx.key).await?;
+        let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
+        let source = Source::new(self, &cx.globals, &cx.key, acknowledgements).await?;
 
         Ok(Box::pin(
             source
@@ -551,7 +570,7 @@ impl SourceConfig for Config {
     }
 
     fn can_acknowledge(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -584,6 +603,8 @@ struct Source {
     delay_deletion: Duration,
     include_file_metric_tag: bool,
     rotate_wait: Duration,
+    acknowledgements: bool,
+    maybe_logs_dir: Option<String>,
 }
 
 impl Source {
@@ -591,6 +612,7 @@ impl Source {
         config: &Config,
         globals: &GlobalOptions,
         key: &ComponentKey,
+        acknowledgements: bool,
     ) -> crate::Result<Self> {
         let self_node_name = if config.self_node_name.is_empty()
             || config.self_node_name == default_self_node_name_env_template()
@@ -673,6 +695,84 @@ impl Source {
             delay_deletion,
             include_file_metric_tag: config.internal_metrics.include_file_tag,
             rotate_wait: config.rotate_wait,
+            acknowledgements,
+            maybe_logs_dir: None,
+        })
+    }
+
+    #[cfg(test)]
+    async fn new_test(
+        config: &Config,
+        globals: &GlobalOptions,
+        key: &ComponentKey,
+        acknowledgements: bool,
+        client: Client,
+        logs_dir: String,
+    ) -> crate::Result<Self> {
+        let self_node_name = if config.self_node_name.is_empty()
+            || config.self_node_name == default_self_node_name_env_template()
+        {
+            std::env::var(SELF_NODE_NAME_ENV_KEY).map_err(|_| {
+                format!(
+                    "self_node_name config value or {} env var is not set",
+                    SELF_NODE_NAME_ENV_KEY
+                )
+            })?
+        } else {
+            config.self_node_name.clone()
+        };
+
+        let field_selector = prepare_field_selector(config, self_node_name.as_str())?;
+        let label_selector = prepare_label_selector(config.extra_label_selector.as_ref());
+        let namespace_label_selector =
+            prepare_label_selector(config.extra_namespace_label_selector.as_ref());
+        let node_selector = prepare_node_selector(self_node_name.as_str())?;
+
+        let data_dir = globals.resolve_and_make_data_subdir(config.data_dir.as_ref(), key.id())?;
+
+        let include_paths = prepare_include_paths(config)?;
+
+        let exclude_paths = prepare_exclude_paths(config)?;
+
+        let glob_minimum_cooldown = config.glob_minimum_cooldown_ms;
+
+        let delay_deletion = config.delay_deletion_ms;
+
+        let ingestion_timestamp_field = config
+            .ingestion_timestamp_field
+            .clone()
+            .and_then(|k| k.path);
+
+        Ok(Self {
+            client,
+            data_dir,
+            auto_partial_merge: config.auto_partial_merge,
+            pod_fields_spec: config.pod_annotation_fields.clone(),
+            namespace_fields_spec: config.namespace_annotation_fields.clone(),
+            node_field_spec: config.node_annotation_fields.clone(),
+            field_selector,
+            label_selector,
+            namespace_label_selector,
+            node_selector,
+            self_node_name,
+            include_paths,
+            exclude_paths,
+            read_from: ReadFrom::from(config.read_from),
+            ignore_older_secs: config.ignore_older_secs,
+            max_read_bytes: config.max_read_bytes,
+            oldest_first: config.oldest_first,
+            max_line_bytes: config.max_line_bytes,
+            max_merged_line_bytes: config.max_merged_line_bytes,
+            fingerprint_lines: config.fingerprint_lines,
+            glob_minimum_cooldown,
+            use_apiserver_cache: config.use_apiserver_cache,
+            ingestion_timestamp_field,
+            delay_deletion,
+            include_file_metric_tag: config.internal_metrics.include_file_tag,
+            rotate_wait: config.rotate_wait,
+            insert_namespace_fields: config.insert_namespace_fields,
+            acknowledgements,
+            maybe_logs_dir: Some(logs_dir),
         })
     }
 
@@ -710,6 +810,8 @@ impl Source {
             delay_deletion,
             include_file_metric_tag,
             rotate_wait,
+            acknowledgements,
+            maybe_logs_dir,
         } = self;
 
         let mut reflectors = Vec::new();
@@ -800,6 +902,7 @@ impl Source {
             include_paths,
             exclude_paths,
             insert_namespace_fields,
+            maybe_logs_dir,
         );
         let annotator = PodMetadataAnnotator::new(pod_state, pod_fields_spec, log_namespace);
         let ns_annotator =
@@ -874,6 +977,33 @@ impl Source {
 
         let (file_source_tx, file_source_rx) = futures::channel::mpsc::channel::<Vec<Line>>(2);
 
+        let (finalizer, shutdown_checkpointer) = if acknowledgements {
+            // The shutdown sent in to the finalizer is the global
+            // shutdown handle used to tell it to stop accepting new batch
+            // statuses and just wait for the remaining acks to come in.
+            let (finalizer, mut ack_stream) = OrderedFinalizer::<FinalizerEntry>::new(None);
+
+            // We set up a separate shutdown signal to tie together the
+            // finalizer and the checkpoint writer task in the file
+            // server, to make it continue to write out updated
+            // checkpoints until all the acks have come in.
+            let (send_shutdown, shutdown2) = oneshot::channel::<()>();
+            let checkpoints = checkpointer.view();
+            tokio::spawn(async move {
+                while let Some((status, entry)) = ack_stream.next().await {
+                    if status == BatchStatus::Delivered {
+                        checkpoints.update(entry.file_id, entry.offset);
+                    }
+                }
+                send_shutdown.send(())
+            });
+            (Some(finalizer), shutdown2.map(|_| ()).boxed())
+        } else {
+            // When not dealing with end-to-end acknowledgements, just
+            // clone the global shutdown to stop the checkpoint writer.
+            (None, global_shutdown.clone().map(|_| ()).boxed())
+        };
+
         let checkpoints = checkpointer.view();
         let events = file_source_rx.flat_map(futures::stream::iter);
         let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
@@ -918,7 +1048,18 @@ impl Source {
                 }
             }
 
-            checkpoints.update(line.file_id, line.end_offset);
+            if let Some(finalizer) = &finalizer {
+                let (batch, receiver) = BatchNotifier::new_with_receiver();
+                event = event.with_batch_notifier(&batch);
+                let entry = FinalizerEntry {
+                    file_id: line.file_id,
+                    offset: line.end_offset,
+                };
+                finalizer.add(entry, receiver);
+            } else {
+                checkpoints.update(line.file_id, line.end_offset);
+            }
+
             event
         });
 
@@ -942,15 +1083,21 @@ impl Source {
         let mut lifecycle = Lifecycle::new();
         {
             let (slot, shutdown) = lifecycle.add();
-            let fut = util::run_file_server(file_server, file_source_tx, shutdown, checkpointer)
-                .map(|result| match result {
-                    Ok(FileServerShutdown) => info!(message = "File server completed gracefully."),
-                    Err(error) => emit!(KubernetesLifecycleError {
-                        message: "File server exited with an error.",
-                        error,
-                        count: events_count,
-                    }),
-                });
+            let fut = util::run_file_server(
+                file_server,
+                file_source_tx,
+                shutdown,
+                shutdown_checkpointer,
+                checkpointer,
+            )
+            .map(|result| match result {
+                Ok(FileServerShutdown) => info!(message = "File server completed gracefully."),
+                Err(error) => emit!(KubernetesLifecycleError {
+                    message: "File server exited with an error.",
+                    error,
+                    count: events_count,
+                }),
+            });
             slot.bind(Box::pin(fut));
         }
         {
