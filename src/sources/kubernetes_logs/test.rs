@@ -961,7 +961,7 @@ mod tests {
             assert_eq!(lines, vec!["first line"]);
         }
         // Perform 'file rotation' to archive old lines.
-        fs::rename(&path.clone(), &path_for_old_file).expect("could not rename");
+        fs::rename(path.clone(), &path_for_old_file).expect("could not rename");
 
         // Restart the server and make sure it does not re-read the old file
         // even though it has a new name.

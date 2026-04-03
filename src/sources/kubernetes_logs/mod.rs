@@ -32,7 +32,7 @@ use vector_lib::{
         FileServer, Line, Shutdown as FileServerShutdown, calculate_ignore_before,
     },
     file_source_common::{
-        Checkpointer, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
+        Checkpointer, FileFingerprint, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
     },
     finalizer::OrderedFinalizer,
     internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol},
@@ -58,7 +58,6 @@ use crate::{
     serde::bool_or_struct,
     shutdown::ShutdownSignal,
     sources,
-    sources::file::FinalizerEntry,
     sources::kubernetes_logs::partial_events_merger::merge_partial_events,
     transforms::{FunctionTransform, OutputBuffer},
 };
@@ -81,6 +80,13 @@ use self::{
     node_metadata_annotator::NodeMetadataAnnotator, parser::Parser,
     pod_metadata_annotator::PodMetadataAnnotator,
 };
+
+/// Entry tracked by the finalizer for acknowledgement-based checkpointing.
+#[derive(Debug)]
+struct FinalizerEntry {
+    file_id: FileFingerprint,
+    offset: u64,
+}
 
 /// The `self_node_name` value env var key.
 const SELF_NODE_NAME_ENV_KEY: &str = "VECTOR_SELF_NODE_NAME";
