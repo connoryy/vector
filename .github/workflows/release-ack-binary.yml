@@ -1,0 +1,67 @@
+name: Build and Release Ack Binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - connor/k8s-logs-acks-merge2
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Vector (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libclang-dev libsasl2-dev protobuf-compiler pkg-config
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build release binary
+        run: cargo build --release --locked --no-default-features --features default
+
+      - name: Strip binary
+        run: strip target/release/vector
+
+      - name: Get commit SHA
+        id: sha
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ack-${{ steps.sha.outputs.sha }}
+          name: "Vector with k8s-logs ack support (${{ steps.sha.outputs.sha }})"
+          body: |
+            Pre-built Vector binary with kubernetes_logs acknowledgement support.
+            Branch: connor/k8s-logs-acks-merge2
+            Commit: ${{ github.sha }}
+            Target: ${{ matrix.target }}
+          files: target/release/vector
+          make_latest: true
