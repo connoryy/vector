@@ -18,17 +18,31 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install build dependencies
+      - name: Install build dependencies (native)
+        if: matrix.arch == 'amd64'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ libclang-dev libsasl2-dev protobuf-compiler pkg-config
+
+      - name: Install build dependencies (cross-compile aarch64)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libclang-dev libsasl2-dev protobuf-compiler pkg-config \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -39,15 +53,50 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-release-
 
       - name: Build release binary
-        run: cargo build --release --locked --no-default-features --features default
+        run: cargo build --release --locked --no-default-features --features default --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
 
       - name: Strip binary
-        run: strip target/release/vector
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/vector
+          else
+            strip target/${{ matrix.target }}/release/vector
+          fi
+
+      - name: Rename binary with arch suffix
+        run: cp target/${{ matrix.target }}/release/vector vector-${{ matrix.arch }}
+
+      - name: Get commit SHA
+        id: sha
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ matrix.arch }}
+          path: vector-${{ matrix.arch }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
 
       - name: Get commit SHA
         id: sha
@@ -62,6 +111,8 @@ jobs:
             Pre-built Vector binary with kubernetes_logs acknowledgement support.
             Branch: connor/k8s-logs-acks-merge2
             Commit: ${{ github.sha }}
-            Target: ${{ matrix.target }}
-          files: target/release/vector
+            Targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+          files: |
+            artifacts/vector-amd64/vector-amd64
+            artifacts/vector-arm64/vector-arm64
           make_latest: true
