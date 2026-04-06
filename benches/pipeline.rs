@@ -20,8 +20,7 @@ use vector::{
     transforms::{FunctionTransform, OutputBuffer, filter::Filter},
 };
 use vector_lib::codecs::{
-    BytesDeserializer, CharacterDelimitedDecoder,
-    decoding::format::Deserializer,
+    BytesDeserializer, CharacterDelimitedDecoder, decoding::format::Deserializer,
 };
 
 /// A single JSON log line (similar to what test-log-producer emits).
@@ -54,7 +53,7 @@ fn decode_only(payload: PipelinePayload) -> usize {
     let mut count = 0;
 
     while let Ok(Some(frame)) = framer.decode(&mut input) {
-        if let Ok(events) = deserializer.parse(frame.into(), Default::default()) {
+        if let Ok(events) = deserializer.parse(frame, Default::default()) {
             count += events.len();
         }
     }
@@ -71,7 +70,7 @@ fn decode_and_filter(payload: PipelinePayload) -> usize {
     let mut count = 0;
 
     while let Ok(Some(frame)) = framer.decode(&mut input) {
-        if let Ok(events) = deserializer.parse(frame.into(), Default::default()) {
+        if let Ok(events) = deserializer.parse(frame, Default::default()) {
             for event in events {
                 filter.transform(&mut output, event);
                 count += 1;
