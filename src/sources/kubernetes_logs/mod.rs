@@ -4,7 +4,7 @@
 //! running inside the cluster as a DaemonSet.
 
 #![deny(missing_docs)]
-use std::{cmp::min, path::PathBuf, time::Duration};
+use std::{cmp::min, collections::HashMap, path::PathBuf, time::Duration};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -26,8 +26,8 @@ use vector_lib::codecs::{BytesDeserializer, BytesDeserializerConfig};
 use vector_lib::configurable::configurable_component;
 use vector_lib::event::{BatchNotifier, BatchStatus};
 use vector_lib::file_source::{
-    calculate_ignore_before, Checkpointer, FileServer, FileServerShutdown, FingerprintStrategy,
-    Fingerprinter, Line, ReadFrom, ReadFromConfig,
+    calculate_ignore_before, Checkpointer, FileFingerprint, FileServer, FileServerShutdown,
+    FingerprintStrategy, Fingerprinter, Line, ReadFrom, ReadFromConfig,
 };
 use vector_lib::finalizer::OrderedFinalizer;
 use vector_lib::lookup::{lookup_v2::OptionalTargetPath, owned_value_path, path, OwnedTargetPath};
@@ -891,7 +891,9 @@ impl Source {
             tokio::spawn(async move {
                 while let Some((status, entry)) = ack_stream.next().await {
                     if status == BatchStatus::Delivered {
-                        checkpoints.update(entry.file_id, entry.offset);
+                        for (file_id, offset) in entry.checkpoints {
+                            checkpoints.update(file_id, offset);
+                        }
                     }
                 }
                 send_shutdown.send(())
@@ -904,63 +906,90 @@ impl Source {
         };
 
         let checkpoints = checkpointer.view();
-        let events = file_source_rx.flat_map(futures::stream::iter);
         let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
-        let events = events.map(move |line| {
-            let byte_size = line.text.len();
-            bytes_received.emit(ByteSize(byte_size));
-
-            let mut event = create_event(
-                line.text,
-                &line.filename,
-                ingestion_timestamp_field.as_ref(),
-                log_namespace,
-            );
-
-            let file_info = annotator.annotate(&mut event, &line.filename);
-
-            emit!(KubernetesLogsEventsReceived {
-                file: &line.filename,
-                byte_size: event.estimated_json_encoded_size_of(),
-                pod_info: file_info.as_ref().map(|info| KubernetesLogsPodInfo {
-                    name: info.pod_name.to_owned(),
-                    namespace: info.pod_namespace.to_owned(),
-                }),
-            });
-
-            if file_info.is_none() {
-                emit!(KubernetesLogsEventAnnotationError { event: &event });
-            } else {
-                let namespace = file_info.as_ref().map(|info| info.pod_namespace);
-
-                if let Some(name) = namespace {
-                    let ns_info = ns_annotator.annotate(&mut event, name);
-
-                    if ns_info.is_none() {
-                        emit!(KubernetesLogsEventNamespaceAnnotationError { event: &event });
-                    }
-                }
-
-                let node_info = node_annotator.annotate(&mut event, self_node_name.as_str());
-
-                if node_info.is_none() {
-                    emit!(KubernetesLogsEventNodeAnnotationError { event: &event });
-                }
-            }
-
-            if let Some(finalizer) = &finalizer {
+        let events = file_source_rx.flat_map(move |lines: Vec<Line>| {
+            // ONE BatchNotifier for the entire batch (typically 100-1000 lines)
+            let batch_notifier = if let Some(finalizer) = &finalizer {
                 let (batch, receiver) = BatchNotifier::new_with_receiver();
-                event = event.with_batch_notifier(&batch);
+
+                // Collect max offset per file_id in this batch
+                let mut max_offsets: HashMap<FileFingerprint, u64> = HashMap::new();
+                for line in &lines {
+                    max_offsets
+                        .entry(line.file_id)
+                        .and_modify(|o| *o = (*o).max(line.end_offset))
+                        .or_insert(line.end_offset);
+                }
+
+                // ONE finalizer entry for the whole batch
                 let entry = FinalizerEntry {
-                    file_id: line.file_id,
-                    offset: line.end_offset,
+                    checkpoints: max_offsets.into_iter().collect(),
                 };
                 finalizer.add(entry, receiver);
+                Some(batch)
             } else {
-                checkpoints.update(line.file_id, line.end_offset);
-            }
+                None
+            };
 
-            event
+            // Process each line, sharing the batch notifier
+            let events: Vec<_> = lines
+                .into_iter()
+                .map(|line| {
+                    let byte_size = line.text.len();
+                    bytes_received.emit(ByteSize(byte_size));
+
+                    let mut event = create_event(
+                        line.text,
+                        &line.filename,
+                        ingestion_timestamp_field.as_ref(),
+                        log_namespace,
+                    );
+
+                    let file_info = annotator.annotate(&mut event, &line.filename);
+
+                    emit!(KubernetesLogsEventsReceived {
+                        file: &line.filename,
+                        byte_size: event.estimated_json_encoded_size_of(),
+                        pod_info: file_info.as_ref().map(|info| KubernetesLogsPodInfo {
+                            name: info.pod_name.to_owned(),
+                            namespace: info.pod_namespace.to_owned(),
+                        }),
+                    });
+
+                    if file_info.is_none() {
+                        emit!(KubernetesLogsEventAnnotationError { event: &event });
+                    } else {
+                        let namespace = file_info.as_ref().map(|info| info.pod_namespace);
+
+                        if let Some(name) = namespace {
+                            let ns_info = ns_annotator.annotate(&mut event, name);
+
+                            if ns_info.is_none() {
+                                emit!(KubernetesLogsEventNamespaceAnnotationError {
+                                    event: &event
+                                });
+                            }
+                        }
+
+                        let node_info =
+                            node_annotator.annotate(&mut event, self_node_name.as_str());
+
+                        if node_info.is_none() {
+                            emit!(KubernetesLogsEventNodeAnnotationError { event: &event });
+                        }
+                    }
+
+                    if let Some(batch) = &batch_notifier {
+                        event = event.with_batch_notifier(batch);
+                    } else {
+                        checkpoints.update(line.file_id, line.end_offset);
+                    }
+
+                    event
+                })
+                .collect();
+
+            futures::stream::iter(events)
         });
 
         let mut parser = Parser::new(log_namespace);

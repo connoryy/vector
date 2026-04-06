@@ -370,8 +370,7 @@ impl From<FingerprintConfig> for FingerprintStrategy {
 
 #[derive(Debug)]
 pub(crate) struct FinalizerEntry {
-    pub(crate) file_id: FileFingerprint,
-    pub(crate) offset: u64,
+    pub(crate) checkpoints: Vec<(FileFingerprint, u64)>,
 }
 
 impl Default for FileConfig {
@@ -603,7 +602,9 @@ pub fn file_source(
         tokio::spawn(async move {
             while let Some((status, entry)) = ack_stream.next().await {
                 if status == BatchStatus::Delivered {
-                    checkpoints.update(entry.file_id, entry.offset);
+                    for (file_id, offset) in entry.checkpoints {
+                        checkpoints.update(file_id, offset);
+                    }
                 }
             }
             send_shutdown.send(())
@@ -676,8 +677,7 @@ pub fn file_source(
                 let (batch, receiver) = BatchNotifier::new_with_receiver();
                 event = event.with_batch_notifier(&batch);
                 let entry = FinalizerEntry {
-                    file_id: line.file_id,
-                    offset: line.end_offset,
+                    checkpoints: vec![(line.file_id, line.end_offset)],
                 };
                 finalizer.add(entry, receiver);
             } else {
