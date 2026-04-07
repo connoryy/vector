@@ -19,14 +19,13 @@
 **Impact estimate**: Medium-High in benchmarks, but changes affect production instrumentation fidelity.
 **Mutation analysis**: N/A — this is a code path optimization, not a caching/sharing change.
 
-## Priority 3: Dedupe build_cache_entry allocations
+## Priority 3: Dedupe coerce_to_bytes and Vec allocation in build_cache_entry
 
-**Source**: Profiling shows `build_cache_entry` at 2.3-2.8% in transform suite.
-**Details**: `build_cache_entry` allocates a Vec and calls `coerce_to_bytes()` on every field value on every event. For IgnoreFields mode, it also chains two iterators and does ConfigTargetPath::try_from per field.
-**Potential**: Pre-allocate Vec with known capacity, avoid coerce_to_bytes by hashing values directly, cache field indices.
-**File**: `src/transforms/dedupe/transform.rs:90-121`
-**Impact estimate**: Medium (only affects dedupe transform benchmarks, 2.5% of transform suite CPU).
-**Mutation analysis**: N/A — Vec and Bytes are created per-event, not cached. Optimization is to avoid allocations entirely (hash in-place).
+**Source**: Post-iteration-7 — `ConfigTargetPath` parsing is now cached, but `coerce_to_bytes()` and `OwnedTargetPath::clone()` still run per field per event.
+**Details**: After caching parsed paths, the remaining costs in `build_cache_entry` are: (1) `coerce_to_bytes()` on every field value (serializes to Bytes), (2) `path.0.clone()` (OwnedTargetPath clone) for the CacheEntry::Ignore variant, (3) Vec allocation for the entry. Further optimization could hash values in-place instead of serializing to Bytes, or intern OwnedTargetPaths.
+**File**: `src/transforms/dedupe/transform.rs:121-145`
+**Impact estimate**: Low-Medium (remaining dedupe overhead after path caching).
+**Mutation analysis**: N/A — values are serialized per-event. Optimization would avoid serialization entirely.
 
 ## Priority 4: Memory allocation/deallocation overhead (systemic)
 
@@ -79,3 +78,7 @@
 ### SmallVec intermediate collection in decode_all_frames (was related to Priority 6)
 
 **Reason**: Completed in Iteration 6. Refactored `decode_all_frames() -> SmallVec` to `for_each_frame(FnMut(Bytes))` streaming callback. Eliminated intermediate collection of ~75K frames, improving cache locality and reducing allocation pressure. Improvement: 9.9-35.4% on codec benchmarks. PR #27.
+
+### Dedupe ConfigTargetPath::try_from per-event parsing (was Priority 3)
+
+**Reason**: Completed in Iteration 7. Cached parsed `ConfigTargetPath` results in a per-instance `HashMap<KeyString, Option<ConfigTargetPath>>`. After first event, all subsequent events get cache hits (single HashMap lookup instead of VRL path parse). Improvement: -10.6% on dedupe/field_ignore_message, -2.6% on dedupe/field_ignore_done. PR #28.
