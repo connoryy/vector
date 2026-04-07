@@ -1,10 +1,11 @@
-use std::{future::ready, num::NonZeroUsize, pin::Pin};
+use std::{collections::HashMap, future::ready, num::NonZeroUsize, pin::Pin};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use lru::LruCache;
 use vector_lib::lookup::lookup_v2::ConfigTargetPath;
 use vrl::path::OwnedTargetPath;
+use vrl::value::KeyString;
 
 use super::common::FieldMatchConfig;
 use crate::{
@@ -13,10 +14,15 @@ use crate::{
     transforms::TaskTransform,
 };
 
+/// Cache for parsed field paths to avoid re-parsing on every event.
+/// Maps field name → parsed ConfigTargetPath (None if parsing failed).
+pub(crate) type PathCache = HashMap<KeyString, Option<ConfigTargetPath>>;
+
 #[derive(Clone)]
 pub struct Dedupe {
     fields: FieldMatchConfig,
     cache: LruCache<CacheEntry, bool>,
+    path_cache: PathCache,
 }
 
 type TypeId = u8;
@@ -70,11 +76,12 @@ impl Dedupe {
         Self {
             fields,
             cache: LruCache::new(num_entries),
+            path_cache: PathCache::new(),
         }
     }
 
     pub fn transform_one(&mut self, event: Event) -> Option<Event> {
-        let cache_entry = build_cache_entry(&event, &self.fields);
+        let cache_entry = build_cache_entry(&event, &self.fields, &mut self.path_cache);
         if self.cache.put(cache_entry, true).is_some() {
             emit!(DedupeEventsDropped { count: 1 });
             None
@@ -87,10 +94,17 @@ impl Dedupe {
 /// Takes in an Event and returns a CacheEntry to place into the LRU cache
 /// containing all relevant information for the fields that need matching
 /// against according to the specified FieldMatchConfig.
-pub(crate) fn build_cache_entry(event: &Event, fields: &FieldMatchConfig) -> CacheEntry {
+///
+/// The `path_cache` caches parsed `ConfigTargetPath` results for field names,
+/// avoiding expensive VRL path re-parsing on every event in the IgnoreFields path.
+pub(crate) fn build_cache_entry(
+    event: &Event,
+    fields: &FieldMatchConfig,
+    path_cache: &mut PathCache,
+) -> CacheEntry {
     match &fields {
         FieldMatchConfig::MatchFields(fields) => {
-            let mut entry = Vec::new();
+            let mut entry = Vec::with_capacity(fields.len());
             for field_name in fields.iter() {
                 if let Some(value) = event.as_log().get(field_name) {
                     entry.push(Some((type_id_for_value(value), value.coerce_to_bytes())));
@@ -107,10 +121,25 @@ pub(crate) fn build_cache_entry(event: &Event, fields: &FieldMatchConfig) -> Cac
                 && let Some(metadata_fields) = event.as_log().all_metadata_fields()
             {
                 for (field_name, value) in event_fields.chain(metadata_fields) {
-                    if let Ok(path) = ConfigTargetPath::try_from(field_name)
-                        && !fields.contains(&path)
+                    // Cache parsed ConfigTargetPath to avoid VRL path re-parsing on every event.
+                    // On cache hit (common case after first event): single HashMap lookup.
+                    // On cache miss (first event only): one clone + parse + insert.
+                    let cached_path = match path_cache.get(field_name.as_str()) {
+                        Some(v) => v.as_ref(),
+                        None => {
+                            let parsed = ConfigTargetPath::try_from(field_name.clone()).ok();
+                            let key = field_name;
+                            path_cache.entry(key).or_insert(parsed).as_ref()
+                        }
+                    };
+                    if let Some(path) = cached_path
+                        && !fields.contains(path)
                     {
-                        entry.push((path.0, type_id_for_value(value), value.coerce_to_bytes()));
+                        entry.push((
+                            path.0.clone(),
+                            type_id_for_value(value),
+                            value.coerce_to_bytes(),
+                        ));
                     }
                 }
             }

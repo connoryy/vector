@@ -5,7 +5,7 @@ use lru::LruCache;
 
 use super::{
     common::{FieldMatchConfig, TimedCacheConfig},
-    transform::{CacheEntry, build_cache_entry},
+    transform::{CacheEntry, PathCache, build_cache_entry},
 };
 use crate::{event::Event, internal_events::DedupeEventsDropped, transforms::TaskTransform};
 
@@ -14,6 +14,7 @@ pub struct TimedDedupe {
     fields: FieldMatchConfig,
     cache: LruCache<CacheEntry, Instant>,
     time_config: TimedCacheConfig,
+    path_cache: PathCache,
 }
 
 impl TimedDedupe {
@@ -26,11 +27,12 @@ impl TimedDedupe {
             fields,
             cache: LruCache::new(num_entries),
             time_config,
+            path_cache: PathCache::new(),
         }
     }
 
     pub fn transform_one(&mut self, event: Event) -> Option<Event> {
-        let cache_entry = build_cache_entry(&event, &self.fields);
+        let cache_entry = build_cache_entry(&event, &self.fields, &mut self.path_cache);
         let now = Instant::now();
         let drop_event = match self.cache.get(&cache_entry) {
             Some(&time) => {
