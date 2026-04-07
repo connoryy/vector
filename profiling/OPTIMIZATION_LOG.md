@@ -34,8 +34,6 @@ baseline. Grows vertically — one row per iteration, no width limit.
 | | | | **codecs/newline/no_max** | **-22.1%** | **-66.7%** |
 | | | | **codecs/char_delim/small_max** | **-18.8%** | **-63.9%** |
 | | | | **codecs/newline/small_max** | **-9.9%** | **-52.1%** |
-| **7** | **Cache ConfigTargetPath in dedupe IgnoreFields** | [**#28**](https://github.com/connoryy/vector/pull/28) | **dedupe/field_ignore_msg** | **-10.6%** | **~-24%** |
-| | | | **dedupe/field_ignore_done** | **-2.6%** | **~-17%** |
 
 **Current best cumulative improvements** (latest iteration in bold):
 
@@ -387,45 +385,3 @@ The streaming callback pattern (`for_each_frame`) processes each frame inline: e
 The split borrows pattern in `Decoder::decode_all` was necessary because `self.framer.for_each_frame()` takes `&mut self` while the closure needs `&self.deserializer`. Rust's borrow checker can't see that these are disjoint fields through a `&mut self` reference, so we bind `let deserializer = &self.deserializer;` before calling `self.framer.for_each_frame()`.
 
 The encoder regression (JsonSerializer +19.1%) is likely measurement noise — the benchmark has 7.33% outliers and the encoder code was not modified. The regression is not correlated with the codec changes.
-
-## Iteration 7
-
-**Date**: 2026-04-07
-**Discovery Method**: CPU profiling of transform benchmarks. `build_cache_entry` at 48% of dedupe transform CPU, with `ConfigTargetPath::try_from` consuming 35% of `build_cache_entry` time. The IgnoreFields path parses every field name into a VRL `ConfigTargetPath` on every event, even though the set of field names is stable after the first event.
-**Target**: `build_cache_entry()` IgnoreFields path in `src/transforms/dedupe/transform.rs`
-**Change**: Added a `PathCache = HashMap<KeyString, Option<ConfigTargetPath>>` that caches parsed `ConfigTargetPath` results per field name. On cache hit (common case after first event): single HashMap lookup. On cache miss (first event only): one clone + parse + insert. Also added `Vec::with_capacity(fields.len())` for the MatchFields entry vector. Updated both `Dedupe` and `TimedDedupe` structs with the path cache.
-**Result**: MERGED
-**Improvement**: -10.6% on dedupe/field_ignore_message, -2.6% on dedupe/field_ignore_done
-**PR**: https://github.com/connoryy/vector/pull/28
-
-### Baseline (on optimized branch, post-iteration-6, back-to-back A/B)
-
-| Benchmark | Mean |
-| ----------- | ------ |
-| dedupe/field_ignore_message | 84.70 µs |
-| dedupe/field_ignore_done | 89.10 µs |
-| dedupe/field_match_message | 33.24 µs |
-| dedupe/field_match_done | 38.40 µs |
-
-### After
-
-| Benchmark | Mean | Change |
-| ----------- | ------ | -------- |
-| dedupe/field_ignore_message | 76.06 µs | **-10.6%** |
-| dedupe/field_ignore_done | 86.70 µs | **-2.6%** |
-| dedupe/field_match_message | 33.69 µs | +1.6% (noise) |
-| dedupe/field_match_done | 35.57 µs | -7.4% (high variance) |
-
-Control group (filter benchmarks, unmodified code): stable within ±0.7%, confirming system conditions comparable between baseline and after runs.
-
-### Analysis
-
-The IgnoreFields path in `build_cache_entry` iterates all event and metadata fields, parsing each field name into a `ConfigTargetPath` via `try_from(KeyString)` on every event. The VRL path parser is non-trivial — it handles dot-separated paths, array indices, quoted segments, etc. For a typical event with ~5-10 fields, this means 5-10 VRL path parses per event.
-
-The HashMap cache exploits the fact that the set of field names in a log pipeline is typically stable (same schema across events). After the first event populates the cache, all subsequent events get cache hits — a single HashMap `get()` per field (O(1) amortized) instead of a full VRL path parse.
-
-The `-10.6%` improvement on `field_ignore_message` vs `-2.6%` on `field_ignore_done` makes sense: `field_ignore_message` has real fields to parse (message, timestamp, etc.) while `field_ignore_done` uses non-existent ignore fields, so the ratio of parse-time to total-time differs.
-
-The MatchFields benchmarks show no significant change as expected — that path uses `ConfigTargetPath` directly from the config (already parsed), not from event field enumeration.
-
-**E2E note**: The E2E pipeline tests remap+filter+route (not dedupe), so E2E throughput is unaffected by this change. This is a targeted transform-specific optimization.
