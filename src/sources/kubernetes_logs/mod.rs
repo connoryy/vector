@@ -4,7 +4,7 @@
 //! running inside the cluster as a DaemonSet.
 
 #![deny(missing_docs)]
-use std::{cmp::min, collections::HashMap, path::PathBuf, time::Duration};
+use std::{cmp::min, collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -24,7 +24,7 @@ use serde_with::serde_as;
 use tokio::sync::oneshot;
 use vector_lib::codecs::{BytesDeserializer, BytesDeserializerConfig};
 use vector_lib::configurable::configurable_component;
-use vector_lib::event::{BatchNotifier, BatchStatus};
+use vector_lib::event::{BatchNotifier, BatchStatus, EventFinalizer};
 use vector_lib::file_source::{
     calculate_ignore_before, Checkpointer, FileFingerprint, FileServer, FileServerShutdown,
     FingerprintStrategy, Fingerprinter, Line, ReadFrom, ReadFromConfig,
@@ -980,8 +980,10 @@ impl Source {
         let checkpoints = checkpointer.view();
         let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
         let events = file_source_rx.flat_map(move |lines: Vec<Line>| {
-            // ONE BatchNotifier for the entire batch (typically 100-1000 lines)
-            let batch_notifier = if let Some(finalizer) = &finalizer {
+            // ONE BatchNotifier + ONE shared Arc<EventFinalizer> for the entire batch.
+            // This eliminates per-event heap allocations: each event only does an
+            // Arc::clone (single atomic increment) instead of allocating a new EventFinalizer.
+            let shared_finalizer = if let Some(finalizer) = &finalizer {
                 let (batch, receiver) = BatchNotifier::new_with_receiver();
 
                 // Collect max offset per file_id in this batch
@@ -998,12 +1000,14 @@ impl Source {
                     checkpoints: max_offsets.into_iter().collect(),
                 };
                 finalizer.add(entry, receiver);
-                Some(batch)
+
+                // ONE shared Arc<EventFinalizer> — cloned per event (cheap atomic op)
+                Some(Arc::new(EventFinalizer::new(batch)))
             } else {
                 None
             };
 
-            // Process each line, sharing the batch notifier
+            // Process each line, sharing the finalizer Arc
             let events: Vec<_> = lines
                 .into_iter()
                 .map(|line| {
@@ -1051,8 +1055,8 @@ impl Source {
                         }
                     }
 
-                    if let Some(batch) = &batch_notifier {
-                        event = event.with_batch_notifier(batch);
+                    if let Some(fin) = &shared_finalizer {
+                        event = event.with_shared_finalizer(Arc::clone(fin));
                     } else {
                         checkpoints.update(line.file_id, line.end_offset);
                     }

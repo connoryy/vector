@@ -310,6 +310,16 @@ impl EventMetadata {
         }
     }
 
+    /// Replace the finalizer with a pre-existing shared `Arc<EventFinalizer>`.
+    ///
+    /// This avoids per-event heap allocations when sharing a single finalizer
+    /// across all events in a batch (only an `Arc::clone` per event).
+    #[must_use]
+    pub fn with_shared_finalizer(mut self, shared: Arc<EventFinalizer>) -> Self {
+        self.get_mut().finalizers = EventFinalizers::from_shared(shared);
+        self
+    }
+
     /// Replace the schema definition with the given one.
     #[must_use]
     pub fn with_schema_definition(mut self, schema_definition: &Arc<schema::Definition>) -> Self {

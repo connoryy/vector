@@ -292,6 +292,12 @@ impl LogEvent {
         self
     }
 
+    #[must_use]
+    pub fn with_shared_finalizer(mut self, shared: Arc<EventFinalizer>) -> Self {
+        self.metadata = self.metadata.with_shared_finalizer(shared);
+        self
+    }
+
     pub fn add_finalizer(&mut self, finalizer: EventFinalizer) {
         self.metadata.add_finalizer(finalizer);
     }

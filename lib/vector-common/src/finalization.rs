@@ -7,6 +7,7 @@ use std::{cmp, future::Future, mem, pin::Pin, sync::Arc, task::Poll};
 
 use crossbeam_utils::atomic::AtomicCell;
 use futures::future::FutureExt;
+use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
 #[cfg(feature = "byte_size_of")]
@@ -14,7 +15,7 @@ use crate::byte_size_of::ByteSizeOf;
 
 /// A collection of event finalizers.
 #[derive(Clone, Debug, Default)]
-pub struct EventFinalizers(Vec<Arc<EventFinalizer>>);
+pub struct EventFinalizers(SmallVec<[Arc<EventFinalizer>; 1]>);
 
 impl Eq for EventFinalizers {}
 
@@ -49,12 +50,25 @@ impl ByteSizeOf for EventFinalizers {
 
 impl EventFinalizers {
     /// Default empty finalizer set for use in `const` contexts.
-    pub const DEFAULT: Self = Self(Vec::new());
+    pub const DEFAULT: Self = Self(SmallVec::new_const());
 
     /// Creates a new `EventFinalizers` based on the given event finalizer.
     #[must_use]
     pub fn new(finalizer: EventFinalizer) -> Self {
-        Self(vec![Arc::new(finalizer)])
+        let mut v = SmallVec::new();
+        v.push(Arc::new(finalizer));
+        Self(v)
+    }
+
+    /// Creates a new `EventFinalizers` from a pre-existing shared `Arc<EventFinalizer>`.
+    ///
+    /// This avoids a redundant `Arc` allocation when the finalizer is already wrapped in an `Arc`,
+    /// e.g. when sharing a single finalizer across all events in a batch.
+    #[must_use]
+    pub fn from_shared(shared: Arc<EventFinalizer>) -> Self {
+        let mut v = SmallVec::new();
+        v.push(shared);
+        Self(v)
     }
 
     /// Returns `true` if the collection contains no event finalizers.

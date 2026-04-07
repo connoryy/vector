@@ -46,7 +46,7 @@ paste.workspace = true
 pin-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-smallvec = { version = "1", default-features = false }
+smallvec = { version = "1", default-features = false, features = ["const_new"] }
 stream-cancel = { version = "0.8.2", default-features = false }
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "time"] }
 tracing = { version = "0.1.34", default-features = false }
