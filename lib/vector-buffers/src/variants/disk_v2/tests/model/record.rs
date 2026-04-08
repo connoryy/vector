@@ -43,6 +43,7 @@ pub struct Record {
 }
 
 impl Record {
+    #[allow(clippy::borrow_interior_mutable_const)]
     pub(crate) const fn new(id: u32, size: u32, event_count: u32) -> Self {
         Record {
             id,

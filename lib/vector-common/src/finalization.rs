@@ -50,6 +50,8 @@ impl ByteSizeOf for EventFinalizers {
 
 impl EventFinalizers {
     /// Default empty finalizer set for use in `const` contexts.
+    // An empty SmallVec contains no Arc elements, so interior mutability is not a concern.
+    #[allow(clippy::declare_interior_mutable_const)]
     pub const DEFAULT: Self = Self(SmallVec::new_const());
 
     /// Creates a new `EventFinalizers` based on the given event finalizer.

@@ -15,6 +15,7 @@ macro_rules! message_wrapper {
         pub(crate) struct $id(pub $ty, EventFinalizers);
 
         impl $id {
+            #[allow(clippy::borrow_interior_mutable_const)]
             pub const fn new(value: $ty) -> Self {
                 Self(value, EventFinalizers::DEFAULT)
             }

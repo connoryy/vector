@@ -295,16 +295,15 @@ impl Event {
     /// Attach a shared `Arc<EventFinalizer>` to this event, avoiding per-event allocation.
     #[must_use]
     pub fn with_shared_finalizer(self, shared: Arc<EventFinalizer>) -> Self {
-        match self {
-            Self::Log(log) => log.with_shared_finalizer(shared).into(),
-            _ => {
-                // For non-Log events, fall back to metadata-based approach.
-                // In practice this path is never hit (only used from kubernetes_logs).
-                let mut event = self;
-                let metadata = std::mem::take(event.metadata_mut());
-                *event.metadata_mut() = metadata.with_shared_finalizer(shared);
-                event
-            }
+        if let Self::Log(log) = self {
+            log.with_shared_finalizer(shared).into()
+        } else {
+            // For non-Log events, fall back to metadata-based approach.
+            // In practice this path is never hit (only used from kubernetes_logs).
+            let mut event = self;
+            let metadata = std::mem::take(event.metadata_mut());
+            *event.metadata_mut() = metadata.with_shared_finalizer(shared);
+            event
         }
     }
 
