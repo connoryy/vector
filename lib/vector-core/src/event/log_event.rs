@@ -325,9 +325,9 @@ impl LogEvent {
         // (concurrent path), so the main thread's send_single_buffer only reads
         // cached values instead of recomputing from a full BTreeMap walk.
         let json_size = inner.fields.estimated_json_encoded_size_of();
-        inner.json_encoded_size_cache.store(
-            NonZeroJsonSize::new(json_size),
-        );
+        inner
+            .json_encoded_size_cache
+            .store(NonZeroJsonSize::new(json_size));
         let byte_size = size_of::<Inner>() + inner.fields.allocated_bytes();
         inner.size_cache.store(NonZeroUsize::new(byte_size));
         Self {

@@ -1,77 +1,129 @@
 # Vector Optimization Log
 
-This file tracks all optimization attempts made by the automated optimization loop.
-Each entry documents what was tried, why, and whether it worked. This prevents
-duplicate work across iterations.
+Tracks all E2E-validated performance optimizations to Vector's hot path.
+Each entry includes isolated and cumulative E2E throughput impact measured
+via Docker profiling (1 GB log file, `--profiler none`, 4-core pinning).
 
-## Format
+## E2E Validation Matrix
 
-Each entry follows this structure:
-- **Date**: ISO timestamp
-- **Hotspot**: What profiling identified as the bottleneck
-- **Change**: What optimization was attempted
-- **Result**: MERGED (with PR link) or REVERTED (with explanation)
-- **Measurements**: Before/after throughput, CPU%, memory
+Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9.97, CV=5.1%)
 
-## Cumulative Impact
+| # | Optimization | Min | Median | Max | σ | Δ median | Δ range | PR |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| — | Master baseline | 185.73 | 195.14 | 205.66 | 9.97 | — | — | — |
+| 1 | metadata Arc restructure | 202.54 | 202.65 | 208.07 | 3.16 | +3.8% | +3.8%..+6.6% | connoryy#29 |
+| 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
+| 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
+| 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
+| **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 
-Track total improvement across all merged optimizations:
+Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
-| Metric | Baseline | Current Best | Total Improvement |
-|--------|----------|-------------|-------------------|
-| Max throughput (events/sec) | TBD | TBD | — |
-| CPU per event (µs) | TBD | TBD | — |
-| Memory RSS at 1k/s steady (Mi) | TBD | TBD | — |
-| P99 latency (ms) | TBD | TBD | — |
-| `cargo bench --bench remap` parse_json (ns/iter) | 518 | 345 | ~33.4% |
-| `cargo bench --bench remap` add_fields (ns/iter) | 464 | 319 | ~31.3% |
-| `cargo bench --bench remap` coerce (ns/iter) | 900 | 610 | ~32.2% |
+### Raw E2E Data
 
-Update this table after each successful optimization with the new "Current Best" value.
-The baseline should be captured on the first iteration before any changes.
+Master baseline (branch: `master` @ `51f6fce6d`):
+
+```text
+Run 1: 195.14 MiB/s
+Run 2: 185.73 MiB/s
+Run 3: 205.66 MiB/s
+Median: 195.14  Mean: 195.51  σ: 9.97  CV: 5.1%
+```
+
+Iter 9 — metadata Arc restructure (branch: `connor/claude/metadata-arc-restructure`):
+
+```text
+Run 1: 208.07 MiB/s
+Run 2: 202.65 MiB/s
+Run 3: 202.54 MiB/s
+Median: 202.65  Mean: 204.42  σ: 3.16  CV: 1.5%
+Δ median vs master: +3.8%  95% CI: [-4.0%, +13.1%]
+```
+
+Iter 10 — decompose/recompose + eager size cache (branch: `connor/claude/eager-size-cache`):
+
+```text
+Run 1: 205.62 MiB/s
+Run 2: 205.65 MiB/s
+Run 3: 200.27 MiB/s
+Median: 205.62  Mean: 203.85  σ: 3.10  CV: 1.5%
+Δ median vs master: +5.4%  95% CI: [-4.3%, +12.8%]
+```
+
+Iter 11 — ReadOnlyVrlTarget (branch: `connor/claude/readonly-vrl-target`):
+
+```text
+Run 1: 205.61 MiB/s
+Run 2: 205.51 MiB/s
+Run 3: 205.53 MiB/s
+Median: 205.53  Mean: 205.55  σ: 0.05  CV: 0.0%
+Δ median vs master: +5.3%  95% CI: [-3.0%, +13.3%]
+```
+
+Iter 15 — AHash transform outputs (branch: `connor/claude/ahash-transform-outputs`):
+
+```text
+Run 1: 205.66 MiB/s
+Run 2: 200.28 MiB/s
+Run 3: 205.66 MiB/s
+Median: 205.66  Mean: 203.87  σ: 3.11  CV: 1.5%
+Δ median vs master: +5.4%  95% CI: [-4.3%, +12.8%]
+```
+
+Cumulative — all 4 optimizations stacked (branch: `connor/vector-optimized`):
+
+```text
+Run 1: 208.02 MiB/s
+Run 2: 208.02 MiB/s
+Run 3: 208.05 MiB/s
+Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
+Δ median vs master: +6.6%  95% CI: [-1.8%, +14.6%]
+```
+
+### Notes
+
+- E2E pipeline: `file` source → `remap` (VRL parse_json + add fields) → `filter` (VRL condition) → `blackhole` sink
+- Docker image built with `CARGO_PROFILE_RELEASE_DEBUG=2` for symbol retention, jemalloc allocator
+- 4-core CPU pinning via `cpuset: "0-3"` in docker-compose
+- The wide 95% CIs are dominated by master baseline variance (σ=9.97). All optimized runs consistently exceed 200 MiB/s while master has one run at 185.73 MiB/s
+- Individual optimizations show similar deltas (+3.8% to +5.4%) but cumulative is only +6.6%, indicating overlapping hot-path coverage rather than independent bottlenecks
+- The optimizations target different points on the same per-event path: Arc::make_mut avoidance (iter 9), Arc reuse (iter 10), clone elimination (iter 11), and hash speedup (iter 15)
 
 ---
 
-## Known Hotspots (from static analysis)
+## Commit Details
 
-These are the areas identified as likely bottlenecks based on codebase analysis.
-The auto-optimize loop should work through these roughly in priority order:
+### Optimization 1 — metadata Arc restructure
 
-1. **Event cloning in remap transform** (`src/transforms/remap.rs:581-584`) — Full event clone before VRL execution when `drop_on_error + reroute_dropped`. Could use copy-on-write or checkpoint-rollback instead.
-2. **JSON parsing via serde_json** (VRL `parse_json` stdlib) — Could benefit from simd-json. Called 1-3x per event.
-3. **Token redaction regex applied to multiple fields** — encode_json + replace + parse_json round-trip in VRL config. Could be replaced with recursive field walker.
-4. **BTreeMap for Value::Object** (VRL crate) — O(log n) lookup per field access. HashMap would give O(1).
-5. **Fanout EventArray cloning** (`lib/vector-core/src/fanout.rs:303`) — Deep clone for N-1 sinks. Could use Arc<EventArray>.
-6. **Arc::make_mut in VrlTarget::into_parts** — Forces deep clone when Arc refcount > 1.
-7. **metrics-sanitizer for_each loops** — Regex on every tag key/value per metric.1 event.
-8. **Size cache invalidation** (`log_event.rs:191`) — Invalidates on every mutation, even when size isn't queried.
+Files: `lib/vector-core/src/event/metadata.rs`, `lib/vector-core/src/event/proto.rs`
 
----
+`upstream_id` and `schema_definition` are updated at every transform output.
+When inside `Arc<Inner>`, each update triggers `Arc::make_mut` which deep-clones
+the entire `Inner` struct. Moving them to top-level `EventMetadata` fields makes
+updates simple field assignments.
 
-## Iteration 1 — Optimize LogEvent::into_parts to avoid unnecessary Arc::make_mut
+### Optimization 2 — decompose/recompose + eager size cache
 
-- **Date**: 2026-03-24T17:46:08Z
-- **Hotspot**: `LogEvent::into_parts()` in `lib/vector-core/src/event/log_event.rs:277` — Called on every event in the remap transform hot path via `VrlTarget::new()`. Previously called `self.value_mut()` which invokes `Arc::make_mut()` + `invalidate()` before `Arc::try_unwrap()`, adding unnecessary overhead.
-- **Change**: Replaced `value_mut()` + `Arc::try_unwrap().unwrap_or_else(unreachable)` with direct `Arc::try_unwrap()` + fallback field clone. When refcount==1 (common case), this skips the `Arc::make_mut` check and two atomic writes for size cache invalidation. When refcount>1, it clones only the `fields` Value instead of the full `Inner` struct + Arc allocation.
-- **Result**: MERGED
-- **PR**: https://github.com/connoryy/vector/pull/6
-- **Measurements**:
-  - `add_fields/remap`: 464 ns → 453 ns (~2.4% improvement)
-  - `parse_json/remap`: 518 ns → 503 ns (~2.9% improvement, statistically significant p<0.05)
-  - `coerce/remap`: 900 ns → 893 ns (~0.8% improvement)
-- **Files Changed**: `lib/vector-core/src/event/log_event.rs`
+Files: `lib/vector-core/src/event/log_event.rs`, `lib/vector-core/src/event/vrl_target.rs`, `lib/vector-core/src/event/mod.rs`
 
-## Iteration 2 — Reuse Arc allocation in VrlTarget via decompose/recompose
+`LogEvent::decompose()` extracts the `Value` for in-place VRL mutation via
+`mem::replace`, keeping the `Arc<Inner>` alive. `recompose()` puts the mutated
+value back without a new heap allocation. Additionally, `recompose()` eagerly
+computes and caches `json_encoded_size` and `allocated_bytes` so the main
+thread's `send_single_buffer` reads cached values instead of recomputing.
 
-- **Date**: 2026-03-24T19:30:00Z
-- **Hotspot**: `VrlTarget::new()` and `VrlTarget::into_events()` — the LogEvent decomposition/reconstruction round-trip. Previously, `into_parts()` called `value_mut()` (Arc::make_mut + invalidate + Arc::try_unwrap) to extract the Value, and `from_parts()` called `Arc::new(Inner::from(value))` to wrap it back. This allocated a new Arc on every event through the remap transform.
-- **Change**: Added `LogEvent::decompose()` and `LogEvent::recompose()` methods that extract the Value from the Arc while keeping the Arc allocation alive (via `mem::replace` with a Null placeholder). After VRL execution, `recompose()` puts the mutated Value back into the same Arc using `Arc::get_mut()` — no new heap allocation needed. Introduced `LogEventResidual` opaque type to carry the Arc between decompose and recompose. Modified `VrlTarget::LogEvent` variant to store the residual and use it in `into_events()` for the common Object case.
-- **Result**: MERGED
-- **PR**: https://github.com/connoryy/vector/pull/7
-- **Measurements**:
-  - `add_fields/remap`: 465 ns → 319 ns (~31.4% improvement)
-  - `parse_json/remap`: 500 ns → 345 ns (~31.1% improvement)
-  - `coerce/remap`: 899 ns → 610 ns (~32.2% improvement)
-  - All statistically significant (p < 0.05)
-- **Files Changed**: `lib/vector-core/src/event/log_event.rs`, `lib/vector-core/src/event/vrl_target.rs`, `lib/vector-core/src/event/mod.rs`
+### Optimization 3 — ReadOnlyVrlTarget
 
+Files: `lib/vector-core/src/event/vrl_target.rs`, `src/conditions/*.rs`, `src/transforms/*.rs` (7 transforms)
+
+`ReadOnlyVrlTarget` wraps `LogEvent` for read-only VRL condition evaluation
+(filter, route, sample, throttle, etc.) without cloning the event's `Value`.
+Returns errors on mutation attempts — safe because conditions never modify events.
+
+### Optimization 4 — AHash for transform output buffers
+
+Files: `lib/vector-core/Cargo.toml`, `lib/vector-core/src/transform/outputs.rs`, `src/transforms/remap.rs`, `Cargo.lock`
+
+Replaces `HashMap` with `AHashMap` for `TransformOutputsBuf`. This map is
+looked up on every event dispatch. AHash is faster for short string keys
+(output names like "\_default"). `ahash` is already a transitive dependency.

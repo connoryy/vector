@@ -11,17 +11,16 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use criterion::{
-    BatchSize, BenchmarkGroup, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
-    measurement::WallTime,
+    BatchSize, BenchmarkGroup, Criterion, SamplingMode, Throughput, criterion_group,
+    criterion_main, measurement::WallTime,
 };
 use tokio_util::codec::Decoder;
 use vector::{
     conditions::Condition,
     transforms::{FunctionTransform, OutputBuffer, filter::Filter},
 };
-use vector_lib::{
-    codecs::{BytesDeserializer, CharacterDelimitedDecoder, decoding::Framer},
-    event::Event,
+use vector_lib::codecs::{
+    BytesDeserializer, CharacterDelimitedDecoder, decoding::format::Deserializer,
 };
 
 /// A single JSON log line (similar to what test-log-producer emits).
@@ -54,8 +53,9 @@ fn decode_only(payload: PipelinePayload) -> usize {
     let mut count = 0;
 
     while let Ok(Some(frame)) = framer.decode(&mut input) {
-        let _events = deserializer.parse(frame.into(), Default::default());
-        count += 1;
+        if let Ok(events) = deserializer.parse(frame, Default::default()) {
+            count += events.len();
+        }
     }
     count
 }
@@ -70,10 +70,11 @@ fn decode_and_filter(payload: PipelinePayload) -> usize {
     let mut count = 0;
 
     while let Ok(Some(frame)) = framer.decode(&mut input) {
-        let events = deserializer.parse(frame.into(), Default::default());
-        for event in events {
-            filter.transform(&mut output, event);
-            count += 1;
+        if let Ok(events) = deserializer.parse(frame, Default::default()) {
+            for event in events {
+                filter.transform(&mut output, event);
+                count += 1;
+            }
         }
     }
     count
