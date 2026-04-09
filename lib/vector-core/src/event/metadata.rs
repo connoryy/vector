@@ -390,7 +390,13 @@ impl EventMetadata {
     }
 
     /// Consumes all event finalizers and returns them, leaving the list of event finalizers empty.
+    ///
+    /// Avoids triggering `Arc::make_mut` (and a deep clone of the metadata) when
+    /// there are no finalizers to take.
     pub fn take_finalizers(&mut self) -> EventFinalizers {
+        if self.0.finalizers.is_empty() {
+            return EventFinalizers::default();
+        }
         std::mem::take(&mut self.get_mut().finalizers)
     }
 
