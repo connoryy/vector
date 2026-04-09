@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - 'component-probes-v*'
-    branches:
-      - 'connor/local-vector-profiling'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or SHA)'
+        required: false
+        default: 'component-probes'
+      tag:
+        description: 'Release tag to create (e.g. component-probes-v0.49.3). Leave empty for no release.'
+        required: false
 
 jobs:
   build:
@@ -24,6 +30,8 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -45,10 +53,26 @@ jobs:
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/release vector
 
-      - name: Upload to GitHub Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+      - name: Upload to GitHub Release (tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
+          files: ${{ matrix.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to GitHub Release (workflow_dispatch)
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ inputs.ref || 'component-probes' }}
           files: ${{ matrix.artifact }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
