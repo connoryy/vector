@@ -89,6 +89,58 @@ Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
 - Individual optimizations show similar deltas (+3.8% to +5.4%) but cumulative is only +6.6%, indicating overlapping hot-path coverage rather than independent bottlenecks
 - The optimizations target different points on the same per-event path: Arc::make_mut avoidance (iter 9), Arc reuse (iter 10), clone elimination (iter 11), and hash speedup (iter 15)
 
+## Iteration 2 — Re-validation with Complex Pipeline
+
+### Key Finding: jemalloc Feature Was Missing from E2E Docker Builds
+
+The E2E profiling Docker builds require `--no-default-features --features <list>` which
+disables the `default` feature that enables `enable-unix` → `unix` → `tikv-jemallocator`.
+Without the `unix` feature, the Docker binary uses glibc system malloc instead of jemalloc.
+
+**Impact of enabling jemalloc**: ~148 MiB/s (system malloc) → ~208 MiB/s (jemalloc) = **+40%**.
+
+This was fixed by adding `unix` to the default E2E feature list in `e2e-profile.sh`.
+
+### Re-validation: Complex 16-Transform Pipeline with jemalloc
+
+Tested with the production-like `vector.toml` (16+ transforms: remap, exclusive_route,
+filter, throttle, log_to_metric, etc.) and the `unix` feature for jemalloc.
+
+```text
+Master (51f6fce6d) + jemalloc:
+  Run 1: 200.29 MiB/s
+  Run 2: 205.69 MiB/s
+  Run 3: 205.65 MiB/s
+  Median: 205.65  Mean: 203.88  σ: 3.11
+
+Optimized (connor/vector-optimized) + jemalloc:
+  Run 1: 207.98 MiB/s
+  Run 2: 207.94 MiB/s
+  Run 3: 207.97 MiB/s
+  Median: 207.97  Mean: 207.96  σ: 0.02
+
+Δ median: +1.13%  (207.97 - 205.65) / 205.65
+```
+
+The 4 optimizations provide a smaller but still measurable +1.1% improvement
+with jemalloc vs +6.6% with system malloc. This makes sense: jemalloc's faster
+allocator reduces the impact of Arc/allocation-related optimizations.
+
+### Attempted Optimizations (Reverted)
+
+**2a — Lazy UUID**: Defer EventMetadata UUID generation to first access.
+Result: 0% E2E improvement (UUID is already a cheap Uuid::now_v7 call).
+
+**2b — Batch Histogram Recording**: Batch per-event `histogram.record()` calls
+in `LatencyRecorder::on_send`. Result: 0% improvement. The `metrics` crate's
+`Arc<dyn HistogramFn>` vtable dispatch only overrides `record()`, not `record_many()`,
+so the default implementation loops per-event anyway.
+
+**2c — jemalloc malloc_conf Tuning**: Defined `malloc_conf` symbol with
+`background_thread:true,dirty_decay_ms:-1,muzzy_decay_ms:-1`.
+Result: 0% improvement vs jemalloc defaults. The Docker/VM environment and short
+benchmark duration don't generate enough page decay pressure for these settings to matter.
+
 ---
 
 ## Commit Details
