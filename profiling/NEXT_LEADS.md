@@ -7,61 +7,56 @@ Prioritized optimization opportunities for the next round of E2E-validated chang
 - Optimized branch: ~207.97 MiB/s (+1.1%)
 - Noise floor: ~±2 MiB/s (~1%), so optimizations need >2% to be reliably measurable
 
-## Critical: Re-profile with jemalloc
+## Status: Plateau Reached
 
-The profiling data in the dismissed/priority sections below was collected with **system malloc**,
-not jemalloc. With jemalloc enabled, the hot-path profile will be different — allocation
-overhead drops from 15-19% to much less, which will reveal the actual bottlenecks.
+All remaining optimization targets of meaningful size (>1% CPU) require changes to
+the **external VRL crate** or fundamental changes to the **Arc-based event model**.
+Five consecutive attempts within Vector's codebase alone (iter 2a-2c, 3a) yielded 0%
+E2E improvement. The 4 committed optimizations have captured all available gains within
+the current architecture.
 
-**Action needed**: Run a fresh perf profile with the `unix` feature enabled to identify
-the real top-of-profile functions with jemalloc as the allocator.
+### Post-jemalloc CPU Profile (from previous session perf data)
 
-## Priority 1: BTreeMap operations in VRL Value (external crate)
+| Category | % CPU | Status |
+| --- | --- | --- |
+| BTreeMap + memcmp (VRL crate) | 15.9% | Requires VRL crate change |
+| Arc refcount atomics | 9.4% | Fundamental to event model |
+| Value clone/drop (VRL crate) | 6.2% | Requires VRL crate change |
+| String::clone / KeyString (VRL) | 2.03% | Requires VRL crate change |
+| estimated_json_encoded_size_of | 1.25% | Already optimized (iter 2) |
+| SipHash remaining | ~1% | Too small to measure |
 
-**Source**: `vrl::value::value::crud::insert::insert` at 3.9% in codecs suite, `BTreeMap::insert` at 4.7%.
-**Challenge**: The `Value` type lives in the external `vrl` crate. Changes would need to go upstream.
-**Potential**: Replace `BTreeMap<KeyString, Value>` with `IndexMap` or `SmallVec`-based map for the Object variant. Or optimize Vector's call patterns to reduce insertions.
-**E2E relevance**: High — every event goes through VRL parse_json which constructs a BTreeMap.
-**Status**: Still the highest-priority code-level optimization, and likely MORE impactful relative
-to other costs now that allocation overhead is reduced.
+## Priority 1: BTreeMap → faster map in VRL crate (EXTERNAL)
 
-## Priority 2: CharacterDelimitedDecoder::decode hot loop
+**Source**: `BTreeMap::insert` + `get_value` + `dying_next` + `insert_entry` = 10.4% of CPU.
+`memcmp` for BTreeMap key comparisons = 5.5% of CPU. Combined: **15.9%**.
+**What**: Replace `pub type ObjectMap = BTreeMap<KeyString, Value>` with `IndexMap<KeyString, Value, AHashBuilder>` in the VRL crate.
+**Challenge**: BTreeMap provides ordered iteration; some code may depend on this. VRL is at `https://github.com/vectordotdev/vrl.git` (branch `main`).
+**Potential E2E gain**: 5-10% (eliminates O(log n) tree traversal + memcmp, replaces with O(1) hash lookup).
 
-**Source**: 8-11% of codecs suite CPU. Processes ~75K frames per iteration.
-**Potential**: Optimize framing loop, reduce per-frame `buf.split_to(idx).freeze()` overhead, batch event creation.
-**E2E relevance**: Medium — the file source uses newline-delimited decoding in the E2E pipeline.
+## Priority 2: Arc refcount reduction (ARCHITECTURE)
 
-## Priority 3: Per-event schema definition HashMap lookup
+**Source**: `__aarch64_ldadd8_rel` 5.08% + `__aarch64_ldadd8_relax` 3.55% + `__aarch64_cas8_acq` 0.74% = **9.4%**.
+**What**: Reduce Arc clone/drop cycles per event. Main sources: fan-out cloning (topology edges with >1 consumer), per-transform `set_upstream_id(Arc::clone(output_id))`, LogEvent `Arc<Inner>` cloning.
+**Challenge**: Arc is fundamental to LogEvent's COW semantics and the multi-consumer fan-out pattern. Any change affects the core data model.
 
-**Source**: `update_runtime_schema_definition` in `lib/vector-core/src/transform/mod.rs` does
-a `HashMap<OutputId, Arc<Definition>>` lookup per event at every transform output.
-**Potential**: Pre-compute single definition shortcut when HashMap has ≤1 entry (common case).
-Skip the HashMap lookup entirely, replacing with a direct Arc pointer write.
-**E2E relevance**: Medium — called 16× per event in the complex pipeline. But each lookup is
-O(1) amortized, so the per-call cost is small (~5-10ns).
+## Priority 3: VRL Value clone/drop lifecycle (EXTERNAL)
 
-## Priority 4: Reduce per-event telemetry overhead
-
-**Source**: Each transform output records latency histogram (`LatencyRecorder::on_send`) and
-events-received counters via the `metrics` crate. Each `histogram.record()` call does
-3 atomic operations through vtable dispatch.
-**Challenge**: The `metrics` crate's `Arc<dyn HistogramFn>` vtable prevents batch optimization
-(the `record_many` default loops per-event). Would need upstream crate changes or bypassing
-the `metrics` crate.
-**E2E relevance**: Low-Medium — with 16 transforms × ~1M events/sec, this is ~48M atomic
-operations/sec, but atomics are fast on modern CPUs.
+**Source**: `clone_subtree` 2.41%, `Value::clone` 1.25%, `drop_in_place<Value>` 2.54% = **6.2%**.
+**What**: Eliminate the reroute_dropped pre-VRL clone (requires VRL transactional execution for rollback on error). Or reduce Value clone cost via COW sub-trees.
+**Challenge**: The clone is needed for correctness — VRL mutates in-place, so the original must be preserved for the error path.
 
 ## Dismissed
 
 - **EventMetadata UUID generation**: Tested (iter 2a). 0% E2E improvement — already cheap.
 - **Batch histogram recording**: Tested (iter 2b). 0% — blocked by metrics crate vtable.
 - **jemalloc malloc_conf tuning**: Tested (iter 2c). 0% vs jemalloc defaults in Docker/VM.
-- **Memory allocation pressure**: Was 15-19% with system malloc. With jemalloc, this is
-  dramatically reduced. Re-profile needed to quantify remaining allocation overhead.
-- **GroupedTraceableAllocator overhead**: Not relevant when `allocation-tracing` is disabled
-  (which it is in the E2E build without the full `unix` feature set).
-- **Remap backup clone**: Investigated — clone cost is <1% of throughput for the E2E pipeline
-  (each event has only 1 BTreeMap entry at clone time, ~50ns per event).
-- **Throttle template rendering**: Per-event BTreeMap lookup + string allocation (~1-2µs),
-  but throttle is only one of 16 transforms and has high pass-through rate.
-- **VRL del(.) optimization**: External crate change needed, can't optimize from Vector side.
+- **Pre-resolved schema definitions**: Tested (iter 3a). 0% — 1-entry HashMap lookup is already ~5-8ns; savings too small vs BTreeMap/Arc overhead.
+- **Memory allocation pressure**: Was 15-19% with system malloc. With jemalloc, reduced to ~10.4%. Further reduction requires VRL crate changes.
+- **GroupedTraceableAllocator overhead**: Not relevant when `allocation-tracing` is disabled.
+- **Remap backup clone**: Clone cost is <1% of throughput (1 BTreeMap entry at clone time).
+- **Throttle template rendering**: Per-event cost too small relative to total pipeline.
+- **VRL del(.) optimization**: External crate change needed.
+- **Arc<Program> sharing**: Tested in previous session. 0% — jemalloc tcache handles AST clone cost efficiently.
+- **TransformOutputsBuf outputs_spec clone**: Tested in previous session. 0% — per-batch, not per-event.
+- **AHash for log_schema_definitions + cached lookups**: Tested in previous session. REGRESSED -11.89% — 1-entry map too small for AHash benefit, caching machinery added branch misprediction overhead.

@@ -141,6 +141,47 @@ so the default implementation loops per-event anyway.
 Result: 0% improvement vs jemalloc defaults. The Docker/VM environment and short
 benchmark duration don't generate enough page decay pressure for these settings to matter.
 
+## Iteration 3 — Pre-resolved Schema Definitions (Reverted)
+
+### Attempted Optimization
+
+**3a — SchemaDefinitions enum**: Replaced `HashMap<OutputId, Arc<Definition>>` in
+`TransformOutput` with a `SchemaDefinitions` enum: `Empty`, `Single(Arc<Definition>)`,
+or `Multi(HashMap<...>)`. For the common single-input case, this eliminates the
+per-event HashMap lookup in `send_single_buffer`, replacing it with a direct
+`Arc::clone` of the pre-resolved definition.
+
+**Target**: `update_runtime_schema_definition` in `lib/vector-core/src/transform/mod.rs`,
+called per-event at every transform output (16x per event in the E2E pipeline).
+
+**Change**: `SchemaDefinitions::from_map()` converts the HashMap at topology build time.
+The `Single` variant branches once per buffer send (not per event), directly setting
+the schema definition without hash computation, bucket lookup, or key comparison.
+
+**Result**: 0% E2E improvement. 5 paired A/B runs:
+
+```text
+Pair 1: B=208.08, A=202.59  Δ=-2.6%  (A noisy low)
+Pair 2: B=197.25, A=207.96  Δ=+5.4%  (B noisy low)
+Pair 3: B=207.97, A=207.95  Δ=-0.01% CLEAN
+Pair 4: B=208.03, A=207.99  Δ=-0.02% CLEAN
+Pair 5: B=213.80, A=207.96  Δ=-2.7%  (B noisy high)
+Clean pairs median: -0.01%
+```
+
+**Root cause**: A 1-entry HashMap lookup with SipHash is already ~5-8ns per call.
+Even at ~128M calls/sec (16 transforms × 8M events/sec), the total overhead is
+only ~0.6-1.0 seconds out of ~5 seconds total processing time (~12-20%). However,
+with jemalloc enabled, this overhead is dwarfed by BTreeMap operations (15.9% of CPU)
+and Arc atomic operations (9.4% of CPU). The per-event savings are below the
+measurement noise floor.
+
+**Insight**: Post-jemalloc, the remaining optimization targets are all in the VRL
+crate (BTreeMap<KeyString, Value> operations, memcmp key comparisons, Value clone/drop)
+or fundamental to the event ownership model (Arc atomic refcounting). Further
+measurable improvements within Vector's codebase alone are unlikely without VRL
+crate changes. The 4 committed optimizations already captured the low-hanging fruit.
+
 ---
 
 ## Commit Details
