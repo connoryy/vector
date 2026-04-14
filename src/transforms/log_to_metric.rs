@@ -13,7 +13,7 @@ use vector_lib::{
 };
 use vrl::{
     event_path, path,
-    path::{PathParseError, parse_target_path},
+    path::{OwnedTargetPath, PathParseError, parse_target_path},
 };
 
 use crate::{
@@ -179,6 +179,8 @@ const fn default_kind() -> MetricKind {
 #[derive(Debug, Clone)]
 pub struct LogToMetric {
     pub metrics: Vec<MetricConfig>,
+    /// Pre-parsed field paths, one per MetricConfig, to avoid per-event re-parsing.
+    field_paths: Vec<OwnedTargetPath>,
     pub all_metrics: bool,
 }
 
@@ -205,8 +207,14 @@ impl GenerateConfig for LogToMetricConfig {
 #[typetag::serde(name = "log_to_metric")]
 impl TransformConfig for LogToMetricConfig {
     async fn build(&self, _context: &TransformContext) -> crate::Result<Transform> {
+        let metrics = self.metrics.clone().unwrap_or_default();
+        let field_paths = metrics
+            .iter()
+            .map(|m| parse_target_path(m.field()).expect("field path validated at config parse time"))
+            .collect();
         Ok(Transform::function(LogToMetric {
-            metrics: self.metrics.clone().unwrap_or_default(),
+            metrics,
+            field_paths,
             all_metrics: self.all_metrics.unwrap_or_default(),
         }))
     }
@@ -391,6 +399,7 @@ fn prepare_metric_metadata(event: &mut Event) {
 
 fn to_metric_with_config(
     config: &MetricConfig,
+    field: &OwnedTargetPath,
     event: &Event,
     metadata: EventMetadata,
 ) -> Result<Metric, TransformError> {
@@ -402,11 +411,7 @@ fn to_metric_with_config(
         .cloned()
         .or_else(|| Some(Utc::now()));
 
-    let field = parse_target_path(config.field()).map_err(|_e| PathNotFound {
-        path: config.field().to_string(),
-    })?;
-
-    let value = match log.get(&field) {
+    let value = match log.get(field) {
         None => Err(TransformError::PathNotFound {
             path: field.to_string(),
         }),
@@ -913,8 +918,8 @@ impl FunctionTransform for LogToMetric {
             }
         } else {
             prepare_metric_metadata(&mut event);
-            for config in self.metrics.iter() {
-                match to_metric_with_config(config, &event, event.metadata().clone()) {
+            for (config, field_path) in self.metrics.iter().zip(self.field_paths.iter()) {
+                match to_metric_with_config(config, field_path, &event, event.metadata().clone()) {
                     Ok(metric) => {
                         buffer.push(Event::Metric(metric));
                     }
