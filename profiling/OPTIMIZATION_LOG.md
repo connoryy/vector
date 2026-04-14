@@ -18,6 +18,7 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | **All (1-4)** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 | 5 | AHash log_to_metric tags | — | — | — | — | inconclusive | — | — |
 | 6 | Cache Definition::any() + avoid deep clone | — | — | — | — | not measured | — | — |
+| 7 | Cache parse_target_path in Template | — | — | — | — | not measured | — | — |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
@@ -194,3 +195,19 @@ called `get_mut()` → `Arc::make_mut` → full deep copy). Folded stacks show
 ~181M samples in `Arc::new` and ~302M samples in `Arc::make_mut` CAS
 operations within `to_metric_with_config`. Estimated E2E impact ~0.5-0.7%,
 below noise threshold on Docker Desktop for Mac.
+
+### Optimization 7 — Cache parse_target_path in Template
+
+Files: `src/template.rs`
+
+Pre-parses `OwnedTargetPath` at template construction time and stores it
+in the `Part::Reference { src, path }` variant. Previously, every
+`render_event` call went through `parse_path_and_get_value(key)` which
+called `parse_target_path(&key)` to re-parse the same constant string
+on every event. The folded stacks show ~191M samples in
+`render_tag_into → render_template → parse_path_and_get_value →
+parse_target_path` and ~50M samples in direct `to_metric_with_config →
+parse_target_path`. Both Template and UnsignedIntTemplate now use
+`log.get(path)` / `trace.get(path)` with the cached path. Addresses
+the known issue documented in the code comment referencing
+vectordotdev/vector issue 14864.

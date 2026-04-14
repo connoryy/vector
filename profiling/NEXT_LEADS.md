@@ -52,3 +52,4 @@ benchmark (file → remap → filter → blackhole).
 - **estimated_json_encoded_size_of running sum**: Investigated iter 6. Cache hits are already cheap (AtomicCell load); the O(n) iteration at send time is negligible. Expected impact <0.5%.
 - **String::clone at 1.68%**: Investigated iter 6. Almost entirely in error paths and config-time code, not in the hot path. Filter, route, and throttle transforms are read-only (no string cloning).
 - **Bytes shared_clone/shared_drop at 1.77%**: Investigated iter 6. Inherent to the `bytes` crate's atomic refcounting; most usage is in VRL internals. Cannot optimize without VRL crate changes.
+- **parse_target_path per-event re-parsing**: Completed (iter 7). Pre-parsed OwnedTargetPath stored in Part::Reference at template construction time. ~191M samples in render_tag_into path + ~50M in to_metric_with_config path.
