@@ -1,5 +1,7 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
+use ahash::AHashMap;
+
 use bytes::{Bytes, BytesMut};
 use snafu::Snafu;
 use tokio_util::codec::Encoder as _;
@@ -139,8 +141,8 @@ pub(super) struct EventEncoder {
 
 impl EventEncoder {
     fn build_labels(&self, event: &Event) -> Vec<(String, String)> {
-        let mut static_labels: HashMap<String, String> = HashMap::new();
-        let mut dynamic_labels: HashMap<String, String> = HashMap::new();
+        let mut static_labels: AHashMap<String, String> = AHashMap::new();
+        let mut dynamic_labels: AHashMap<String, String> = AHashMap::new();
 
         for (key_template, value_template) in self.labels.iter() {
             let key = key_template.render_string(event);
@@ -214,8 +216,8 @@ impl EventEncoder {
     }
 
     fn build_structured_metadata(&self, event: &Event) -> Vec<(String, String)> {
-        let mut static_structured_metadata: HashMap<String, String> = HashMap::new();
-        let mut dynamic_structured_metadata: HashMap<String, String> = HashMap::new();
+        let mut static_structured_metadata: AHashMap<String, String> = AHashMap::new();
+        let mut dynamic_structured_metadata: AHashMap<String, String> = AHashMap::new();
 
         for (key_template, value_template) in self.structured_metadata.iter() {
             let key = key_template.render_string(event);

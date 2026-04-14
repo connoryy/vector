@@ -1,5 +1,6 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::sync::LazyLock;
 
+use ahash::AHashMap;
 use regex::Regex;
 
 use crate::event::Value;
@@ -15,10 +16,10 @@ fn slugify_text(input: &str) -> String {
 pub(crate) fn pair_expansion(
     key_s: &str,
     value_s: &str,
-    static_pairs: &mut HashMap<String, String>,
-    dynamic_pairs: &mut HashMap<String, String>,
-) -> Result<HashMap<String, String>, serde_json::Error> {
-    let mut expanded_pairs = HashMap::new();
+    static_pairs: &mut AHashMap<String, String>,
+    dynamic_pairs: &mut AHashMap<String, String>,
+) -> Result<AHashMap<String, String>, serde_json::Error> {
+    let mut expanded_pairs = AHashMap::new();
     if let Some(opening_prefix) = key_s.strip_suffix('*') {
         let output: serde_json::map::Map<String, serde_json::Value> =
             serde_json::from_str(value_s)?;

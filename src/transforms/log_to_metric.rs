@@ -1,5 +1,7 @@
 use std::{collections::HashMap, num::ParseFloatError, sync::Arc};
 
+use ahash::AHashMap;
+
 use chrono::Utc;
 use indexmap::IndexMap;
 use vector_lib::{
@@ -280,8 +282,8 @@ fn render_tags(
     tags: &Option<IndexMap<Template, TagConfig>>,
     event: &Event,
 ) -> Result<Option<MetricTags>, TransformError> {
-    let mut static_tags: HashMap<String, String> = HashMap::new();
-    let mut dynamic_tags: HashMap<String, String> = HashMap::new();
+    let mut static_tags: AHashMap<String, String> = AHashMap::new();
+    let mut dynamic_tags: AHashMap<String, String> = AHashMap::new();
     Ok(match tags {
         None => None,
         Some(tags) => {
@@ -331,8 +333,8 @@ fn render_tag_into(
     key_template: &Template,
     value_template: Option<&Template>,
     result: &mut MetricTags,
-    static_tags: &mut HashMap<String, String>,
-    dynamic_tags: &mut HashMap<String, String>,
+    static_tags: &mut AHashMap<String, String>,
+    dynamic_tags: &mut AHashMap<String, String>,
 ) -> Result<(), TransformError> {
     let key = match render_template(key_template, event) {
         Ok(key_s) => key_s,

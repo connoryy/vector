@@ -12244,6 +12244,7 @@ dependencies = [
 name = "vector"
 version = "0.55.0"
 dependencies = [
+ "ahash 0.8.11",
  "apache-avro 0.16.0",
  "approx",
  "arc-swap",
