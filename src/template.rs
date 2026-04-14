@@ -10,7 +10,7 @@ use regex::Regex;
 use snafu::Snafu;
 use vector_lib::{
     configurable::{ConfigurableNumber, ConfigurableString, NumberClass, configurable_component},
-    lookup::lookup_v2::parse_target_path,
+    lookup::{OwnedTargetPath, lookup_v2::parse_target_path},
 };
 
 use crate::{
@@ -117,7 +117,7 @@ impl TryFrom<Cow<'_, str>> for Template {
                     Part::Literal(lit) => lit.len(),
                     // We can't really put a useful number here, assume at least one byte will come
                     // from the input event.
-                    Part::Reference(_path) => 1,
+                    Part::Reference { .. } => 1,
                     Part::Strftime(parsed) => parsed.reserve_size(),
                 })
                 .sum();
@@ -183,23 +183,21 @@ impl Template {
                 Part::Strftime(items) => {
                     out.push_str(&render_timestamp(items, event, self.tz_offset))
                 }
-                Part::Reference(key) => {
+                Part::Reference { src, path } => {
                     out.push_str(
                         &match event {
-                            EventRef::Log(log) => log
-                                .parse_path_and_get_value(key)
-                                .ok()
-                                .and_then(|v| v.map(Value::to_string_lossy)),
-                            EventRef::Metric(metric) => {
-                                render_metric_field(key, metric).map(Cow::Borrowed)
+                            EventRef::Log(log) => {
+                                log.get(path).map(Value::to_string_lossy)
                             }
-                            EventRef::Trace(trace) => trace
-                                .parse_path_and_get_value(key)
-                                .ok()
-                                .and_then(|v| v.map(Value::to_string_lossy)),
+                            EventRef::Metric(metric) => {
+                                render_metric_field(src, metric).map(Cow::Borrowed)
+                            }
+                            EventRef::Trace(trace) => {
+                                trace.get(path).map(Value::to_string_lossy)
+                            }
                         }
                         .unwrap_or_else(|| {
-                            missing_keys.push(key.to_owned());
+                            missing_keys.push(src.to_owned());
                             Cow::Borrowed("")
                         }),
                     );
@@ -219,8 +217,8 @@ impl Template {
             .parts
             .iter()
             .filter_map(|part| {
-                if let Part::Reference(r) = part {
-                    Some(r.to_owned())
+                if let Part::Reference { src, .. } = part {
+                    Some(src.to_owned())
                 } else {
                     None
                 }
@@ -412,23 +410,21 @@ impl UnsignedIntTemplate {
         for part in &self.parts {
             match part {
                 Part::Literal(lit) => out.push_str(lit),
-                Part::Reference(key) => {
+                Part::Reference { src, path } => {
                     out.push_str(
                         &match event {
-                            EventRef::Log(log) => log
-                                .parse_path_and_get_value(key)
-                                .ok()
-                                .and_then(|v| v.map(Value::to_string_lossy)),
-                            EventRef::Metric(metric) => {
-                                render_metric_field(key, metric).map(Cow::Borrowed)
+                            EventRef::Log(log) => {
+                                log.get(path).map(Value::to_string_lossy)
                             }
-                            EventRef::Trace(trace) => trace
-                                .parse_path_and_get_value(key)
-                                .ok()
-                                .and_then(|v| v.map(Value::to_string_lossy)),
+                            EventRef::Metric(metric) => {
+                                render_metric_field(src, metric).map(Cow::Borrowed)
+                            }
+                            EventRef::Trace(trace) => {
+                                trace.get(path).map(Value::to_string_lossy)
+                            }
                         }
                         .unwrap_or_else(|| {
-                            missing_keys.push(key.to_owned());
+                            missing_keys.push(src.to_owned());
                             Cow::Borrowed("")
                         }),
                     );
@@ -452,8 +448,8 @@ impl UnsignedIntTemplate {
             .parts
             .iter()
             .filter_map(|part| {
-                if let Part::Reference(r) = part {
-                    Some(r.to_owned())
+                if let Part::Reference { src, .. } = part {
+                    Some(src.to_owned())
                 } else {
                     None
                 }
@@ -471,7 +467,12 @@ enum Part {
     /// A literal piece of text containing a time format string.
     Strftime(ParsedStrftime),
     /// A reference to the source event, to be copied from the relevant field or tag.
-    Reference(String),
+    /// Stores both the original string (for error messages and metric field rendering)
+    /// and the pre-parsed path (to avoid re-parsing on every render).
+    Reference {
+        src: String,
+        path: OwnedTargetPath,
+    },
 }
 
 // Wrap the parsed time formatter in order to provide `impl Hash` and some convenience functions.
@@ -554,15 +555,16 @@ fn parse_template(src: &str) -> Result<Vec<Part>, TemplateParseError> {
             parts.push(parse_literal(&src[last_end..all.start()])?);
         }
 
-        let path = cap[1].trim().to_owned();
+        let src = cap[1].trim().to_owned();
 
-        // This checks the syntax, but doesn't yet store it for use later
-        // see: https://github.com/vectordotdev/vector/issues/14864
-        if parse_target_path(&path).is_err() {
-            return Err(TemplateParseError::InvalidPathSyntax { path });
-        }
+        // Parse and store the path at construction time (fixes #14864)
+        let parsed_path = parse_target_path(&src)
+            .map_err(|_| TemplateParseError::InvalidPathSyntax { path: src.clone() })?;
 
-        parts.push(Part::Reference(path));
+        parts.push(Part::Reference {
+            src,
+            path: parsed_path,
+        });
         last_end = all.end();
     }
     if src.len() > last_end {
