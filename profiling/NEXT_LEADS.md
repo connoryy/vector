@@ -48,3 +48,7 @@ benchmark (file → remap → filter → blackhole).
 - **Remove allocation-tracing from unix**: Attempted iter 5b, reverted. Relaxed atomic + branch prediction make the fast path zero-cost. Perf attribution misleading. 0% E2E impact.
 - **GroupedTraceableAllocator overhead**: Investigated iter 5b — the 4.05% attributed by perf includes inlined jemalloc time. Actual wrapper overhead is zero on modern CPUs.
 - **Batch-level schema definition resolution**: Attempted iter 5c, reverted. Pre-resolving schema definitions per-batch and eliminating per-event HashMap lookup + EventMutRef enum matching showed 0% E2E impact. The per-event metadata update overhead is negligible vs VRL execution and BTreeMap operations.
+- **Definition::any() per-event allocation**: Completed (iter 6). Cached in static LazyLock, restructured metadata preparation to mutate in-place.
+- **estimated_json_encoded_size_of running sum**: Investigated iter 6. Cache hits are already cheap (AtomicCell load); the O(n) iteration at send time is negligible. Expected impact <0.5%.
+- **String::clone at 1.68%**: Investigated iter 6. Almost entirely in error paths and config-time code, not in the hot path. Filter, route, and throttle transforms are read-only (no string cloning).
+- **Bytes shared_clone/shared_drop at 1.77%**: Investigated iter 6. Inherent to the `bytes` crate's atomic refcounting; most usage is in VRL internals. Cannot optimize without VRL crate changes.

@@ -17,6 +17,7 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
 | **All (1-4)** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 | 5 | AHash log_to_metric tags | — | — | — | — | inconclusive | — | — |
+| 6 | Cache Definition::any() + avoid deep clone | — | — | — | — | not measured | — | — |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
@@ -178,3 +179,18 @@ Perf profile shows 3.64% of total E2E CPU in SipHash, almost entirely from
 event creates two temporary HashMaps (`static_tags`, `dynamic_tags`) with
 4+ tag insertions per event. AHash eliminates the SipHash overhead for these
 non-security-critical local maps.
+
+### Optimization 6 — Cache Definition::any() and avoid per-event deep clone
+
+Files: `lib/vector-core/src/event/metadata.rs`, `src/transforms/log_to_metric.rs`
+
+Caches `Arc::new(Definition::any())` in a static `LazyLock<Arc<Definition>>`
+to eliminate per-event heap allocation of Definition (BTreeMap + BTreeSet + 2
+Kind structs) and Arc wrapper. Also restructures metadata preparation to
+mutate the event's metadata in-place before the per-config loop, avoiding
+`Arc::make_mut` deep clone of Inner (which was triggered because `.clone()`
+on EventMetadata bumped the Arc refcount to 2, then `with_origin_metadata`
+called `get_mut()` → `Arc::make_mut` → full deep copy). Folded stacks show
+~181M samples in `Arc::new` and ~302M samples in `Arc::make_mut` CAS
+operations within `to_metric_with_config`. Estimated E2E impact ~0.5-0.7%,
+below noise threshold on Docker Desktop for Mac.
