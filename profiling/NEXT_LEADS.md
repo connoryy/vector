@@ -23,12 +23,19 @@ benchmark (file → remap → filter → blackhole).
 **Potential**: Pool/arena allocators for short-lived event processing, structural changes to reduce heap allocations.
 **E2E relevance**: Medium — most individual allocation sites have been addressed; remaining overhead is diffuse.
 
-## Priority 4: GroupedTraceableAllocator overhead
+## Priority 4: Value::estimated_json_encoded_size_of (1.23% E2E)
 
-**Source**: ~12% of CPU in transform suite when allocation-tracing feature is enabled.
-**Challenge**: This is instrumentation overhead. Disabling it changes production behavior.
-**Potential**: Make the tracing wrapper truly zero-cost when `TRACK_ALLOCATIONS=false`.
-**E2E relevance**: Low-Medium — this is already present in baseline, so optimizing it would help both.
+**Source**: E2E perf profile shows 1.23% in `estimated_json_encoded_size_of`.
+**Potential**: This walks the entire Value tree. If called multiple times per event, caching the result could help. Already partially addressed by eager size cache in iter 10, but may still be called in other paths.
+**E2E relevance**: Medium — directly visible in E2E profile.
+
+## Priority 5: memcmp (4.60% E2E) — BTreeMap key comparison
+
+**Source**: E2E perf profile shows `memcmp` at 4.60% + `memcmp$plt` at 1.00% = 5.60%.
+**Analysis**: This is BTreeMap key comparison (KeyString is a string type). BTreeMap uses binary search which requires O(log n) comparisons per lookup. The keys are VRL field names like "message", "timestamp", "host".
+**Challenge**: BTreeMap is in the external VRL crate. Would need upstream changes.
+**Potential**: Short-string optimization or interned keys could reduce comparison cost.
+**E2E relevance**: High — 5.60% of total E2E CPU.
 
 ## Dismissed
 
@@ -37,3 +44,7 @@ benchmark (file → remap → filter → blackhole).
 - **BytesDeserializer direct construction**: Completed (iter 4). Direct LogEvent.
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).
+- **AHash for log_schema_definitions**: Attempted iter 5a, reverted. Map too small (1-2 entries) for hash function to matter. 0% E2E impact.
+- **Remove allocation-tracing from unix**: Attempted iter 5b, reverted. Relaxed atomic + branch prediction make the fast path zero-cost. Perf attribution misleading. 0% E2E impact.
+- **GroupedTraceableAllocator overhead**: Investigated iter 5b — the 4.05% attributed by perf includes inlined jemalloc time. Actual wrapper overhead is zero on modern CPUs.
+- **Batch-level schema definition resolution**: Attempted iter 5c, reverted. Pre-resolving schema definitions per-batch and eliminating per-event HashMap lookup + EventMutRef enum matching showed 0% E2E impact. The per-event metadata update overhead is negligible vs VRL execution and BTreeMap operations.

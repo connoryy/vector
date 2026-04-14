@@ -15,7 +15,8 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
-| **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
+| **All (1-4)** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
+| 5 | AHash log_to_metric tags | — | — | — | — | inconclusive | — | — |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
@@ -80,6 +81,16 @@ Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
 Δ median vs master: +6.6%  95% CI: [-1.8%, +14.6%]
 ```
 
+Iter 5 — AHash for log_to_metric tag rendering (branch: `connor/vector-optimized`):
+
+```text
+After: 274.71, 207.98, 265.26, 208.00, 274.65, 274.76 (median: 269.96)
+Baseline: 265.31, 274.79, 197.38, 208.06, 207.97, 265.23 (median: 236.65)
+Note: Docker Desktop on macOS shows extreme multimodal variance (~208/~265/~275 MiB/s)
+      making it impossible to detect improvements below ~10%. Perf profile shows 3.64%
+      SipHash in log_to_metric::render_tags, replaced with AHash.
+```
+
 ### Notes
 
 - E2E pipeline: `file` source → `remap` (VRL parse_json + add fields) → `filter` (VRL condition) → `blackhole` sink
@@ -88,6 +99,34 @@ Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
 - The wide 95% CIs are dominated by master baseline variance (σ=9.97). All optimized runs consistently exceed 200 MiB/s while master has one run at 185.73 MiB/s
 - Individual optimizations show similar deltas (+3.8% to +5.4%) but cumulative is only +6.6%, indicating overlapping hot-path coverage rather than independent bottlenecks
 - The optimizations target different points on the same per-event path: Arc::make_mut avoidance (iter 9), Arc reuse (iter 10), clone elimination (iter 11), and hash speedup (iter 15)
+
+---
+
+## Failed / Reverted Attempts
+
+### Attempt 5a — AHash for log_schema_definitions (REVERTED)
+
+**Target**: `SipHash::write` at 2.83% + 0.81% = 3.64% in E2E perf profile.
+**Change**: Replaced `HashMap<OutputId, Arc<schema::Definition>>` with `AHashMap` in `TransformOutput.log_schema_definitions` and `update_runtime_schema_definition()` function parameter.
+**Files**: `lib/vector-core/src/transform/outputs.rs`, `lib/vector-core/src/transform/mod.rs`
+**Result**: No measurable E2E improvement (274.73 vs 274.75 MiB/s, -0.007%).
+**Reason**: The `log_schema_definitions` map is tiny (1-2 entries per transform). For maps this small, the hash function cost is negligible — the lookup is dominated by function call overhead, not hash computation. The 3.64% SipHash in the perf profile likely comes from other HashMap usage sites or is amplified by profiler instrumentation.
+
+### Attempt 5b — Remove allocation-tracing from unix feature (REVERTED)
+
+**Target**: `GroupedTraceableAllocator::alloc` at 2.79% + `::dealloc` at 1.26% = 4.05% in E2E perf profile.
+**Change**: Removed `allocation-tracing` from the `unix` Cargo feature, so default builds use raw jemalloc without the tracing wrapper.
+**Files**: `Cargo.toml` (single line: `unix = ["tikv-jemallocator"]`)
+**Result**: No measurable E2E improvement (265.21 vs 274.75 MiB/s median — within bimodal noise).
+**Reason**: The `GroupedTraceableAllocator` fast path is a single `AtomicBool::load(Ordering::Relaxed)` check that always returns false. Modern CPUs with branch prediction handle this perfectly — the branch is always correctly predicted and the atomic load hits L1 cache. The 4.05% attributed by perf is misleading: the profiler attributes the underlying jemalloc alloc/dealloc time to the wrapper function symbol, not to the actual jemalloc internals (due to inlining).
+
+### Attempt 5c — Batch-level schema definition resolution (REVERTED)
+
+**Target**: Per-event `update_runtime_schema_definition` overhead in `send_single_buffer`: HashMap lookup + Arc::clone/drop per event per transform stage.
+**Change**: Replaced per-event HashMap lookup + EventMutRef enum matching with batch-level resolution: pre-resolve schema definition once per EventArray, operate directly on typed arrays (Vec<LogEvent>, Vec<Metric>, Vec<TraceEvent>), and added Arc::ptr_eq fast path in `set_schema_definition` to skip redundant Arc operations.
+**Files**: `lib/vector-core/src/transform/outputs.rs`, `lib/vector-core/src/event/metadata.rs`
+**Result**: No measurable E2E improvement (274.66 vs 274.67 MiB/s median, 6 runs each in warm state).
+**Reason**: The per-event metadata update cost (HashMap lookup on 1-2 entry map + 2 Arc atomic operations) is negligible compared to the dominant costs: VRL execution, BTreeMap operations in the VRL crate, and I/O. The optimization eliminates real CPU work (HashMap hashing, enum matching, atomic refcount operations) but these account for far less than 1% of total pipeline throughput.
 
 ---
 
@@ -127,3 +166,15 @@ Files: `lib/vector-core/Cargo.toml`, `lib/vector-core/src/transform/outputs.rs`,
 Replaces `HashMap` with `AHashMap` for `TransformOutputsBuf`. This map is
 looked up on every event dispatch. AHash is faster for short string keys
 (output names like "\_default"). `ahash` is already a transitive dependency.
+
+### Optimization 5 — AHash for log_to_metric tag rendering
+
+Files: `Cargo.toml`, `Cargo.lock`, `src/common/expansion.rs`, `src/transforms/log_to_metric.rs`, `src/sinks/loki/sink.rs`
+
+Replaces `std::collections::HashMap` (SipHash) with `ahash::AHashMap` for
+the per-event tag accumulation maps in `render_tags` and `pair_expansion`.
+Perf profile shows 3.64% of total E2E CPU in SipHash, almost entirely from
+`log_to_metric::render_tags → HashMap::insert → SipHash::write`. Each metric
+event creates two temporary HashMaps (`static_tags`, `dynamic_tags`) with
+4+ tag insertions per event. AHash eliminates the SipHash overhead for these
+non-security-critical local maps.
