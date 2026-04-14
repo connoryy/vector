@@ -364,6 +364,11 @@ impl EventMetadata {
         self
     }
 
+    /// Sets the `DatadogMetricOriginMetadata` in-place.
+    pub fn set_origin_metadata(&mut self, origin_metadata: DatadogMetricOriginMetadata) {
+        self.get_mut().datadog_origin_metadata = Some(origin_metadata);
+    }
+
     /// Replaces the existing `source_event_id` with the given one.
     #[must_use]
     pub fn with_source_event_id(mut self, source_event_id: Option<Uuid>) -> Self {

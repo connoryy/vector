@@ -1,4 +1,4 @@
-use std::{collections::HashMap, num::ParseFloatError, sync::Arc};
+use std::{collections::HashMap, num::ParseFloatError, sync::Arc, sync::LazyLock};
 
 use ahash::AHashMap;
 
@@ -23,7 +23,7 @@ use crate::{
         TransformOutput, schema::Definition,
     },
     event::{
-        Event, Value,
+        Event, EventMetadata, Value,
         metric::{Metric, MetricKind, MetricTags, MetricValue, StatisticKind, TagValue},
     },
     internal_events::{
@@ -39,6 +39,9 @@ use crate::{
 };
 
 const ORIGIN_SERVICE_VALUE: u32 = 3;
+
+/// Cached `Arc<Definition::any()>` to avoid per-event heap allocation.
+static DEFINITION_ANY: LazyLock<Arc<Definition>> = LazyLock::new(|| Arc::new(Definition::any()));
 
 /// Configuration for the `log_to_metric` transform.
 #[configurable_component(transform("log_to_metric", "Convert log events to metric events."))]
@@ -372,7 +375,25 @@ fn render_tag_into(
     Ok(())
 }
 
-fn to_metric_with_config(config: &MetricConfig, event: &Event) -> Result<Metric, TransformError> {
+/// Prepare the metric metadata from a mutable event reference, setting the
+/// schema definition and origin metadata in-place. This avoids per-event
+/// heap allocations by using a cached `Arc<Definition>` and mutating the
+/// event's metadata directly (which is a no-op if the Arc refcount is 1).
+fn prepare_metric_metadata(event: &mut Event) {
+    let meta = event.metadata_mut();
+    meta.set_schema_definition(&DEFINITION_ANY);
+    meta.set_origin_metadata(DatadogMetricOriginMetadata::new(
+        None,
+        None,
+        Some(ORIGIN_SERVICE_VALUE),
+    ));
+}
+
+fn to_metric_with_config(
+    config: &MetricConfig,
+    event: &Event,
+    metadata: EventMetadata,
+) -> Result<Metric, TransformError> {
     let log = event.as_log();
 
     let timestamp = log
@@ -380,17 +401,6 @@ fn to_metric_with_config(config: &MetricConfig, event: &Event) -> Result<Metric,
         .and_then(Value::as_timestamp)
         .cloned()
         .or_else(|| Some(Utc::now()));
-
-    // Assign the OriginService for the new metric
-    let metadata = event
-        .metadata()
-        .clone()
-        .with_schema_definition(&Arc::new(Definition::any()))
-        .with_origin_metadata(DatadogMetricOriginMetadata::new(
-            None,
-            None,
-            Some(ORIGIN_SERVICE_VALUE),
-        ));
 
     let field = parse_target_path(config.field()).map_err(|_e| PathNotFound {
         path: config.field().to_string(),
@@ -859,7 +869,7 @@ fn to_metrics(event: &Event) -> Result<Metric, TransformError> {
 }
 
 impl FunctionTransform for LogToMetric {
-    fn transform(&mut self, output: &mut OutputBuffer, event: Event) {
+    fn transform(&mut self, output: &mut OutputBuffer, mut event: Event) {
         // Metrics are "all or none" for a specific log. If a single fails, none are produced.
         let mut buffer = Vec::with_capacity(self.metrics.len());
         if self.all_metrics {
@@ -902,8 +912,9 @@ impl FunctionTransform for LogToMetric {
                 }
             }
         } else {
+            prepare_metric_metadata(&mut event);
             for config in self.metrics.iter() {
-                match to_metric_with_config(config, &event) {
+                match to_metric_with_config(config, &event, event.metadata().clone()) {
                     Ok(metric) => {
                         buffer.push(Event::Metric(metric));
                     }
