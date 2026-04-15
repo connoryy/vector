@@ -210,7 +210,9 @@ impl TransformConfig for LogToMetricConfig {
         let metrics = self.metrics.clone().unwrap_or_default();
         let field_paths = metrics
             .iter()
-            .map(|m| parse_target_path(m.field()).expect("field path validated at config parse time"))
+            .map(|m| {
+                parse_target_path(m.field()).expect("field path validated at config parse time")
+            })
             .collect();
         Ok(Transform::function(LogToMetric {
             metrics,

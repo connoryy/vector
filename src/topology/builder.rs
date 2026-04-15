@@ -845,7 +845,12 @@ impl<'a> Builder<'a> {
             .map(move |mut events| {
                 let single_def = single_definition.as_ref();
                 for event in events.iter_events_mut() {
-                    update_runtime_schema_definition(event, &output_id, &schema_definition_map, single_def);
+                    update_runtime_schema_definition(
+                        event,
+                        &output_id,
+                        &schema_definition_map,
+                        single_def,
+                    );
                 }
                 let now = Instant::now();
                 latency_recorder.on_send(&mut events, now);

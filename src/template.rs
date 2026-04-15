@@ -186,15 +186,11 @@ impl Template {
                 Part::Reference { src, path } => {
                     out.push_str(
                         &match event {
-                            EventRef::Log(log) => {
-                                log.get(path).map(Value::to_string_lossy)
-                            }
+                            EventRef::Log(log) => log.get(path).map(Value::to_string_lossy),
                             EventRef::Metric(metric) => {
                                 render_metric_field(src, metric).map(Cow::Borrowed)
                             }
-                            EventRef::Trace(trace) => {
-                                trace.get(path).map(Value::to_string_lossy)
-                            }
+                            EventRef::Trace(trace) => trace.get(path).map(Value::to_string_lossy),
                         }
                         .unwrap_or_else(|| {
                             missing_keys.push(src.to_owned());
@@ -413,15 +409,11 @@ impl UnsignedIntTemplate {
                 Part::Reference { src, path } => {
                     out.push_str(
                         &match event {
-                            EventRef::Log(log) => {
-                                log.get(path).map(Value::to_string_lossy)
-                            }
+                            EventRef::Log(log) => log.get(path).map(Value::to_string_lossy),
                             EventRef::Metric(metric) => {
                                 render_metric_field(src, metric).map(Cow::Borrowed)
                             }
-                            EventRef::Trace(trace) => {
-                                trace.get(path).map(Value::to_string_lossy)
-                            }
+                            EventRef::Trace(trace) => trace.get(path).map(Value::to_string_lossy),
                         }
                         .unwrap_or_else(|| {
                             missing_keys.push(src.to_owned());
@@ -469,10 +461,7 @@ enum Part {
     /// A reference to the source event, to be copied from the relevant field or tag.
     /// Stores both the original string (for error messages and metric field rendering)
     /// and the pre-parsed path (to avoid re-parsing on every render).
-    Reference {
-        src: String,
-        path: OwnedTargetPath,
-    },
+    Reference { src: String, path: OwnedTargetPath },
 }
 
 // Wrap the parsed time formatter in order to provide `impl Hash` and some convenience functions.

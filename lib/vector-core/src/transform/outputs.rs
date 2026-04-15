@@ -43,7 +43,10 @@ impl TransformOutputs {
     pub fn new(
         outputs_in: Vec<config::TransformOutput>,
         component_key: &ComponentKey,
-    ) -> (Self, std::collections::HashMap<Option<String>, fanout::ControlChannel>) {
+    ) -> (
+        Self,
+        std::collections::HashMap<Option<String>, fanout::ControlChannel>,
+    ) {
         let outputs_spec = outputs_in.clone();
         let mut primary_output = None;
         let mut named_outputs = AHashMap::new();
@@ -150,12 +153,7 @@ impl TransformOutputs {
         let log_schema_defs = &output.log_schema_definitions;
 
         for event in buf.events_mut() {
-            super::update_runtime_schema_definition(
-                event,
-                output_id,
-                log_schema_defs,
-                single_def,
-            );
+            super::update_runtime_schema_definition(event, output_id, log_schema_defs, single_def);
         }
         let count = buf.len();
         let byte_size = buf.estimated_json_encoded_size_of();
