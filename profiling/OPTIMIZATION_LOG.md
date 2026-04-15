@@ -15,7 +15,6 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
-| 5 | DEFAULT_INNER LazyLock cache | 160.44 | 161.74 | 162.03 | 0.63 | +2.1% | +1.3%..+2.3% | native-macos |
 | **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
@@ -69,18 +68,6 @@ Run 2: 200.28 MiB/s
 Run 3: 205.66 MiB/s
 Median: 205.66  Mean: 203.87  σ: 3.11  CV: 1.5%
 Δ median vs master: +5.4%  95% CI: [-4.3%, +12.8%]
-```
-
-Iter 5 — DEFAULT_INNER LazyLock cache (branch: `connor/vector-optimized`):
-
-```text
-Baseline: [159.62, 159.16, 158.25, 158.37, 157.45] MiB/s
-After:    [162.03, 161.74, 161.80, 160.62, 160.44] MiB/s
-Baseline median: 158.37  CV: 0.53%
-After median:    161.74  CV: 0.46%
-Δ median: +2.13%
-Mann-Whitney U: p=0.0079, Cliff's delta=1.0 (large)
-Runner: native-macos (RAM disk, 200 MiB log, 5 runs, 2-pass warmup)
 ```
 
 Cumulative — all 4 optimizations stacked (branch: `connor/vector-optimized`):
@@ -140,15 +127,3 @@ Files: `lib/vector-core/Cargo.toml`, `lib/vector-core/src/transform/outputs.rs`,
 Replaces `HashMap` with `AHashMap` for `TransformOutputsBuf`. This map is
 looked up on every event dispatch. AHash is faster for short string keys
 (output names like "\_default"). `ahash` is already a transitive dependency.
-
-### Optimization 5 — DEFAULT_INNER LazyLock cache
-
-Files: `lib/vector-core/src/event/metadata.rs`, `lib/vector-core/src/event/proto.rs`, `src/transforms/remap.rs`
-
-Moves `source_id` and `source_type` out of `Arc<Inner>` into top-level
-`EventMetadata` fields (like `upstream_id` and `schema_definition` already
-were). This makes `Inner` fully static for default events, enabling a
-`LazyLock<Arc<Inner>>` cache — `EventMetadata::default()` now does
-`Arc::clone` (pointer bump) instead of `Arc::new(Inner::default())`
-(heap allocation + field initialization). Changed `source_type` from
-`Cow<'static, str>` to `Arc<str>` to keep Event size within 264 bytes.
