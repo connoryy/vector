@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc, sync::LazyLock, time::Instant};
+use std::{collections::BTreeMap, fmt, sync::Arc, sync::LazyLock, time::Instant};
 
 use derivative::Derivative;
 use lookup::OwnedTargetPath;
@@ -28,6 +28,25 @@ const SPLUNK_HEC_TOKEN: &str = "splunk_hec_token";
 pub struct EventMetadata {
     #[serde(flatten)]
     pub(super) inner: Arc<Inner>,
+
+    /// The id of the source that created this event.
+    ///
+    /// Stored outside the `Arc<Inner>` to avoid triggering `Arc::make_mut`
+    /// deep-clones when this field is set by the source, and to enable
+    /// caching a shared default `Inner` via `LazyLock`.
+    #[serde(default)]
+    pub(crate) source_id: Option<Arc<ComponentKey>>,
+
+    /// The type of the source that created this event.
+    ///
+    /// Stored outside the `Arc<Inner>` to avoid triggering `Arc::make_mut`
+    /// deep-clones when this field is set by the source, and to enable
+    /// caching a shared default `Inner` via `LazyLock`.
+    ///
+    /// Uses `Arc<str>` instead of `Cow<'static, str>` to keep `Event` below
+    /// the 256-byte `clippy::result_large_err` threshold.
+    #[serde(default)]
+    pub(crate) source_type: Option<Arc<str>>,
 
     /// The id of the component this event originated from. This is used to
     /// determine which schema definition to attach to an event in transforms.
@@ -69,12 +88,6 @@ pub(super) struct Inner {
 
     #[serde(default, skip)]
     pub(crate) finalizers: EventFinalizers,
-
-    /// The id of the source
-    pub(crate) source_id: Option<Arc<ComponentKey>>,
-
-    /// The type of the source
-    pub(crate) source_type: Option<Cow<'static, str>>,
 
     /// A store of values that may be dropped during the encoding process but may be needed
     /// later on. The map is indexed by meaning.
@@ -148,6 +161,8 @@ impl EventMetadata {
                 value,
                 ..Default::default()
             }),
+            source_id: None,
+            source_type: None,
             upstream_id: None,
             schema_definition: default_schema_definition(),
             last_transform_timestamp: None,
@@ -185,13 +200,13 @@ impl EventMetadata {
     /// Returns a reference to the metadata source id.
     #[must_use]
     pub fn source_id(&self) -> Option<&Arc<ComponentKey>> {
-        self.inner.source_id.as_ref()
+        self.source_id.as_ref()
     }
 
     /// Returns a reference to the metadata source type.
     #[must_use]
     pub fn source_type(&self) -> Option<&str> {
-        self.inner.source_type.as_deref()
+        self.source_type.as_deref()
     }
 
     /// Returns a reference to the metadata parent id. This is the `OutputId`
@@ -203,12 +218,12 @@ impl EventMetadata {
 
     /// Sets the `source_id` in the metadata to the provided value.
     pub fn set_source_id(&mut self, source_id: Arc<ComponentKey>) {
-        self.get_mut().source_id = Some(source_id);
+        self.source_id = Some(source_id);
     }
 
     /// Sets the `source_type` in the metadata to the provided value.
-    pub fn set_source_type<S: Into<Cow<'static, str>>>(&mut self, source_type: S) {
-        self.get_mut().source_type = Some(source_type.into());
+    pub fn set_source_type(&mut self, source_type: impl AsRef<str>) {
+        self.source_type = Some(Arc::from(source_type.as_ref()));
     }
 
     /// Sets the `upstream_id` in the metadata to the provided value.
@@ -277,8 +292,6 @@ impl Default for Inner {
             value: Value::Object(ObjectMap::new()),
             secrets: Secrets::new(),
             finalizers: Default::default(),
-            source_id: None,
-            source_type: None,
             dropped_fields: ObjectMap::new(),
             datadog_origin_metadata: None,
             // Skip per-event UUID generation: `source_event_id` is only
@@ -292,10 +305,28 @@ impl Default for Inner {
     }
 }
 
+/// Cached default `Inner` for `EventMetadata`.
+///
+/// The `Inner` struct contains empty collections (`ObjectMap`, `Secrets`) and
+/// `None` option fields.  By caching a single shared instance behind
+/// `LazyLock`, every call to `EventMetadata::default()` (which happens for
+/// every event) becomes a cheap `Arc::clone` (atomic ref-count increment)
+/// instead of a per-event heap allocation of ~270 bytes.
+///
+/// This is safe because the `Inner` is only mutated (via `Arc::make_mut`)
+/// when metadata value, secrets, finalizers, or other inner fields are
+/// actually modified — which rarely happens on the hot path.  Fields that
+/// *are* set per-event (like `source_id`, `source_type`, `upstream_id`,
+/// `schema_definition`) have been moved out of `Arc<Inner>` so they can be
+/// written without triggering a deep clone.
+static DEFAULT_INNER: LazyLock<Arc<Inner>> = LazyLock::new(|| Arc::new(Inner::default()));
+
 impl Default for EventMetadata {
     fn default() -> Self {
         Self {
-            inner: Arc::new(Inner::default()),
+            inner: Arc::clone(&DEFAULT_INNER),
+            source_id: None,
+            source_type: None,
             upstream_id: None,
             schema_definition: default_schema_definition(),
             last_transform_timestamp: None,
@@ -368,8 +399,8 @@ impl EventMetadata {
 
     /// Replaces the existing `source_type` with the given one.
     #[must_use]
-    pub fn with_source_type<S: Into<Cow<'static, str>>>(mut self, source_type: S) -> Self {
-        self.get_mut().source_type = Some(source_type.into());
+    pub fn with_source_type(mut self, source_type: impl AsRef<str>) -> Self {
+        self.source_type = Some(Arc::from(source_type.as_ref()));
         self
     }
 

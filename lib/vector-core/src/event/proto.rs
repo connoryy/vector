@@ -618,17 +618,23 @@ impl From<OutputId> for crate::config::OutputId {
 }
 
 impl From<EventMetadata> for Metadata {
-    fn from(value: EventMetadata) -> Self {
-        let upstream_id = value.upstream_id.clone();
+    fn from(metadata: EventMetadata) -> Self {
+        let EventMetadata {
+            inner,
+            source_id,
+            source_type,
+            upstream_id,
+            schema_definition: _,
+            last_transform_timestamp: _,
+        } = metadata;
+
         let super::metadata::Inner {
             value,
             secrets,
-            source_id,
-            source_type,
             datadog_origin_metadata,
             source_event_id,
             ..
-        } = value.into_owned();
+        } = Arc::unwrap_or_clone(inner);
 
         let secrets = (!secrets.is_empty()).then(|| secrets.into());
 
@@ -683,12 +689,12 @@ impl From<Metadata> for EventMetadata {
                     .unwrap_or_else(|| vrl::value::Value::Object(ObjectMap::new())),
                 secrets: secrets.unwrap_or_default(),
                 finalizers: EventFinalizers::default(),
-                source_id,
-                source_type: source_type.map(Into::into),
                 dropped_fields: ObjectMap::new(),
                 datadog_origin_metadata,
                 source_event_id,
             }),
+            source_id,
+            source_type: source_type.map(Into::into),
             upstream_id,
             schema_definition: default_schema_definition(),
             last_transform_timestamp: None,
