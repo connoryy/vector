@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc, time::Instant};
+use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc, sync::LazyLock, time::Instant};
 
 use derivative::Derivative;
 use lookup::OwnedTargetPath;
@@ -281,7 +281,13 @@ impl Default for Inner {
             source_type: None,
             dropped_fields: ObjectMap::new(),
             datadog_origin_metadata: None,
-            source_event_id: Some(Uuid::new_v4()),
+            // Skip per-event UUID generation: `source_event_id` is only
+            // serialized in protobuf but never read by any transform,
+            // source, or sink in the pipeline.  Deferring the call to
+            // `Uuid::new_v4()` eliminates ~40-80 ns of RNG overhead per
+            // event on the hot path.  Sources that need a stable event ID
+            // can set one explicitly via `with_source_event_id`.
+            source_event_id: None,
         }
     }
 }
@@ -297,11 +303,21 @@ impl Default for EventMetadata {
     }
 }
 
-pub(super) fn default_schema_definition() -> Arc<schema::Definition> {
+/// Cached default schema definition.
+///
+/// Creating a `Definition` allocates `BTreeMap`, `BTreeSet`, and `Kind` objects.
+/// By caching a single instance behind `LazyLock`, every call to
+/// `default_schema_definition()` (which happens for every event via
+/// `EventMetadata::default()`) becomes a cheap `Arc::clone` instead.
+static DEFAULT_SCHEMA_DEFINITION: LazyLock<Arc<schema::Definition>> = LazyLock::new(|| {
     Arc::new(schema::Definition::new_with_default_metadata(
         Kind::any(),
         [LogNamespace::Legacy, LogNamespace::Vector],
     ))
+});
+
+pub(super) fn default_schema_definition() -> Arc<schema::Definition> {
+    Arc::clone(&DEFAULT_SCHEMA_DEFINITION)
 }
 
 impl ByteSizeOf for EventMetadata {
