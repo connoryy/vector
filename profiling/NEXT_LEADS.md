@@ -34,6 +34,6 @@ benchmark (file → remap → filter → blackhole).
 
 - **EventMetadata UUID generation**: Completed (iter 2). Lazy UUID.
 - **Arc<Inner> caching**: Completed (iter 3). LazyLock DEFAULT_INNER.
-- **BytesDeserializer direct construction**: Completed (iter 4). Direct LogEvent.
+- **BytesDeserializer direct construction**: Completed (iter 5). Direct BTreeMap construction + LazyLock message key cache. Micro-benchmarks: -1.42% remap/add_fields_remap (p=0.0000). E2E inconclusive (coarse timing).
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).

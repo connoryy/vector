@@ -15,6 +15,7 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
+| 5 | BytesDeserializer direct construction | — | — | — | — | ~-1.4% micro | E2E inconclusive | — |
 | **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
@@ -119,6 +120,26 @@ Files: `lib/vector-core/src/event/vrl_target.rs`, `src/conditions/*.rs`, `src/tr
 `ReadOnlyVrlTarget` wraps `LogEvent` for read-only VRL condition evaluation
 (filter, route, sample, throttle, etc.) without cloning the event's `Value`.
 Returns errors on mutation attempts — safe because conditions never modify events.
+
+### Optimization 5 — BytesDeserializer direct BTreeMap construction
+
+Files: `lib/codecs/src/decoding/format/bytes.rs`
+
+The Legacy namespace path in `BytesDeserializer::parse_single` used `LogEvent::default()` +
+`maybe_insert()` which triggered `Arc::make_mut` deep clone of the shared `DEFAULT_INNER`
+plus path traversal overhead in `Value::insert`. This optimization constructs the `ObjectMap`
+directly and uses `LogEvent::from_map()`, avoiding all Arc clone overhead. A `LazyLock<Option<KeyString>>`
+caches the message key extracted from `log_schema()`.
+
+Micro-benchmark results (statistically significant, 300 samples):
+
+- `remap/add_fields_remap`: -1.42% (p=0.0000, Cohen's d=-0.72, medium effect)
+- `remap/coerce_remap`: -0.71% (p=0.0000, Cohen's d=-0.98, large effect)
+- No benchmark regressed >2% (max regression: `newline_bytes/no_max` +0.65%)
+
+E2E validation: Local macOS ARM64 test inconclusive due to coarse timing resolution
+(integer seconds for ~19s test = ~5% measurement granularity). Docker E2E blocked by
+corporate SSL proxy. Event processing rate analysis suggests ~2% improvement (554K vs 543K events/s).
 
 ### Optimization 4 — AHash for transform output buffers
 
