@@ -824,7 +824,7 @@ impl<'a> Builder<'a> {
         let latency_recorder = LatencyRecorder::new(self.config.global.latency_ewma_alpha);
 
         // Task transforms can only write to the default output, so only a single schema def map is needed
-        let schema_definition_map = outputs
+        let schema_definition_map: ahash::AHashMap<_, _> = outputs
             .iter()
             .find(|x| x.port.is_none())
             .expect("output for default port required for task transforms")
@@ -833,12 +833,19 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|(key, value)| (key, Arc::new(value)))
             .collect();
+        // Pre-resolve for single-input fast path
+        let single_definition = if schema_definition_map.len() == 1 {
+            schema_definition_map.values().next().cloned()
+        } else {
+            None
+        };
 
         let stream = t
             .transform(Box::pin(filtered))
             .map(move |mut events| {
+                let single_def = single_definition.as_ref();
                 for event in events.iter_events_mut() {
-                    update_runtime_schema_definition(event, &output_id, &schema_definition_map);
+                    update_runtime_schema_definition(event, &output_id, &schema_definition_map, single_def);
                 }
                 let now = Instant::now();
                 latency_recorder.on_send(&mut events, now);

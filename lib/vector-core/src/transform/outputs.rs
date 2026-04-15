@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error, sync::Arc, time::Instant};
+use std::{error, sync::Arc, time::Instant};
 
 use ahash::AHashMap;
 
@@ -23,8 +23,14 @@ use crate::{
 struct TransformOutput {
     fanout: Fanout,
     events_sent: Registered<EventsSent>,
-    log_schema_definitions: HashMap<OutputId, Arc<schema::Definition>>,
+    /// Schema definitions keyed by upstream component's `OutputId`.
+    /// Uses `AHashMap` for faster lookups (avoids `SipHash` overhead on per-event path).
+    log_schema_definitions: AHashMap<OutputId, Arc<schema::Definition>>,
     output_id: Arc<OutputId>,
+    /// Pre-resolved schema definition for the common single-input case.
+    /// When a transform has exactly one input, this caches the definition
+    /// so we can skip the per-event `HashMap` lookup entirely.
+    single_definition: Option<Arc<schema::Definition>>,
 }
 
 pub struct TransformOutputs {
@@ -37,20 +43,28 @@ impl TransformOutputs {
     pub fn new(
         outputs_in: Vec<config::TransformOutput>,
         component_key: &ComponentKey,
-    ) -> (Self, HashMap<Option<String>, fanout::ControlChannel>) {
+    ) -> (Self, std::collections::HashMap<Option<String>, fanout::ControlChannel>) {
         let outputs_spec = outputs_in.clone();
         let mut primary_output = None;
         let mut named_outputs = AHashMap::new();
-        let mut controls = HashMap::new();
+        let mut controls = std::collections::HashMap::new();
 
         for output in outputs_in {
             let (fanout, control) = Fanout::new();
 
-            let log_schema_definitions = output
+            let log_schema_definitions: AHashMap<OutputId, Arc<schema::Definition>> = output
                 .log_schema_definitions
                 .into_iter()
                 .map(|(id, definition)| (id, Arc::new(definition)))
                 .collect();
+
+            // Pre-resolve for single-input fast path: when there's exactly one
+            // upstream component, cache its definition to skip per-event lookups.
+            let single_definition = if log_schema_definitions.len() == 1 {
+                log_schema_definitions.values().next().cloned()
+            } else {
+                None
+            };
 
             match output.port {
                 None => {
@@ -64,6 +78,7 @@ impl TransformOutputs {
                             component: component_key.clone(),
                             port: None,
                         }),
+                        single_definition,
                     });
                     controls.insert(None, control);
                 }
@@ -80,6 +95,7 @@ impl TransformOutputs {
                                 component: component_key.clone(),
                                 port: Some(name.clone()),
                             }),
+                            single_definition,
                         },
                     );
                     controls.insert(Some(name.clone()), control);
@@ -129,11 +145,16 @@ impl TransformOutputs {
         buf: &mut OutputBuffer,
         output: &mut TransformOutput,
     ) -> Result<(), Box<dyn error::Error + Send + Sync>> {
+        let output_id = &output.output_id;
+        let single_def = output.single_definition.as_ref();
+        let log_schema_defs = &output.log_schema_definitions;
+
         for event in buf.events_mut() {
             super::update_runtime_schema_definition(
                 event,
-                &output.output_id,
-                &output.log_schema_definitions,
+                output_id,
+                log_schema_defs,
+                single_def,
             );
         }
         let count = buf.len();

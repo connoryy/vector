@@ -1,5 +1,6 @@
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 
+use ahash::AHashMap;
 use futures::{Stream, StreamExt};
 
 use crate::{
@@ -170,17 +171,24 @@ impl SyncTransform for Box<dyn FunctionTransform> {
     }
 }
 
-#[allow(clippy::implicit_hasher)]
+/// Updates the runtime schema definition and upstream ID on an event.
+///
 /// `event`: The event that will be updated
-/// `output_id`: The `output_id` that the current even is being sent to (will be used as the new `parent_id`)
-/// `log_schema_definitions`: A mapping of parent `OutputId` to definitions, that will be used to lookup the new runtime definition of the event
+/// `output_id`: The `output_id` that the current event is being sent to (will be used as the new `parent_id`)
+/// `log_schema_definitions`: A mapping of parent `OutputId` to definitions, used to lookup the new runtime definition
+/// `single_definition`: Pre-resolved definition for single-input transforms (avoids per-event `HashMap` lookup)
 pub fn update_runtime_schema_definition(
     mut event: EventMutRef,
     output_id: &Arc<OutputId>,
-    log_schema_definitions: &HashMap<OutputId, Arc<Definition>>,
+    log_schema_definitions: &AHashMap<OutputId, Arc<Definition>>,
+    single_definition: Option<&Arc<Definition>>,
 ) {
     if let EventMutRef::Log(log) = &mut event {
-        if let Some(parent_component_id) = log.metadata().upstream_id() {
+        if let Some(definition) = single_definition {
+            // Fast path: single upstream input, definition pre-resolved at init time.
+            // Skips the per-event HashMap lookup entirely.
+            log.metadata_mut().set_schema_definition(definition);
+        } else if let Some(parent_component_id) = log.metadata().upstream_id() {
             if let Some(definition) = log_schema_definitions.get(parent_component_id) {
                 log.metadata_mut().set_schema_definition(definition);
             }
