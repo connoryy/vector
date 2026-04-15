@@ -30,10 +30,27 @@ benchmark (file → remap → filter → blackhole).
 **Potential**: Make the tracing wrapper truly zero-cost when `TRACK_ALLOCATIONS=false`.
 **E2E relevance**: Low-Medium — this is already present in baseline, so optimizing it would help both.
 
+## Observations from iter 2
+
+- Per-event overhead from UUID generation and schema Definition allocation was
+  significant on Linux/jemalloc (+8.5%) but nearly invisible on macOS native (+0.14%).
+  Future optimizations targeting allocation overhead should be validated on Docker/Linux.
+- VRL runtime dominates remap transform cost (~90% of time). Further non-VRL
+  optimizations in the Vector runtime are hitting diminishing returns.
+- Arc::clone/drop operations in `update_runtime_schema_definition` add ~300ns/event
+  across 15 transforms. A batch-level metadata approach could eliminate this but
+  would require significant refactoring.
+- `set_schema_definition` and `set_upstream_id` use Arc::clone per-event per-transform.
+  `Arc::ptr_eq` checks don't help because each transform sets a different definition.
+
 ## Dismissed
 
-- **EventMetadata UUID generation**: Completed (iter 2). Lazy UUID.
+- **EventMetadata UUID generation**: Completed (optimization 5). Skip `Uuid::new_v4()` in `Inner::default()` — never read in pipeline.
+- **default_schema_definition caching**: Completed (optimization 5). `LazyLock<Arc<Definition>>` avoids per-event heap allocation.
 - **Arc<Inner> caching**: Completed (iter 3). LazyLock DEFAULT_INNER.
 - **BytesDeserializer direct construction**: Completed (iter 4). Direct LogEvent.
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).
+- **CharacterDelimitedDecoder**: Investigated — NewlineDelimitedDecoder is just a wrapper around CharacterDelimitedDecoder. Both use optimized memchr. No Vector-side improvement possible.
+- **Fuse send_single_buffer iterations**: 3 passes (schema update, len, byte_size) iterate EventArrays not individual events. Overhead is negligible compared to per-event work.
+- **Arc::ptr_eq in set_schema_definition**: Won't help — consecutive transforms always set different definitions.

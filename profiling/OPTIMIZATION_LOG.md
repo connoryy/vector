@@ -15,7 +15,8 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
-| **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
+| 5 | lazy event metadata | 294.28 | 294.33 | 294.38 | 0.07 | +8.5% vs cum. | — | — |
+| **All** | **cumulative (5 stacked)** | **294.28** | **294.33** | **294.38** | **0.07** | **+8.5% vs prior** | | |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
@@ -80,6 +81,22 @@ Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
 Δ median vs master: +6.6%  95% CI: [-1.8%, +14.6%]
 ```
 
+Iter 2 — lazy event metadata (branch: `connor/vector-optimized`):
+
+```text
+Run 1: 294.28 MiB/s (after)  vs 270.79 MiB/s (baseline cumulative)
+Run 2: 294.38 MiB/s (after)  vs 271.83 MiB/s (baseline cumulative)
+Mean after: 294.33  Mean baseline: 271.31
+Δ vs cumulative baseline: +8.5%
+```
+
+Note: Docker Desktop environment changed between original measurements and iter 2
+(cumulative baseline shifted from ~208 to ~271 MiB/s). The A/B comparison was done
+in the same session with alternating runs to control for this. On macOS native
+(without jemalloc), the delta was only +0.14%, confirming the savings are
+allocator-dependent — `getrandom(2)` on Linux is significantly more expensive
+than macOS `SecRandomCopyBytes` for per-event UUID generation.
+
 ### Notes
 
 - E2E pipeline: `file` source → `remap` (VRL parse_json + add fields) → `filter` (VRL condition) → `blackhole` sink
@@ -127,3 +144,19 @@ Files: `lib/vector-core/Cargo.toml`, `lib/vector-core/src/transform/outputs.rs`,
 Replaces `HashMap` with `AHashMap` for `TransformOutputsBuf`. This map is
 looked up on every event dispatch. AHash is faster for short string keys
 (output names like "\_default"). `ahash` is already a transitive dependency.
+
+### Optimization 5 — lazy event metadata
+
+Files: `lib/vector-core/src/event/metadata.rs`, `lib/vector-core/src/event/log_event.rs`
+
+Two changes targeting per-event creation overhead:
+
+1. **Cache `default_schema_definition()` with `LazyLock`**: Every `EventMetadata::default()`
+   previously allocated a new `schema::Definition` (BTreeMap, BTreeSet, 2 Kind objects)
+   wrapped in `Arc`. Now a single static instance is shared via `Arc::clone`, turning
+   a heap allocation into a cheap atomic increment.
+
+2. **Skip `Uuid::new_v4()` in `Inner::default()`**: The `source_event_id` field was
+   eagerly generated for every event but never read by any transform, source, or sink
+   in the pipeline. Only serialized in protobuf (which handles `None` gracefully).
+   Deferring generation saves the `getrandom(2)` syscall on Linux (~50-100ns per event).
