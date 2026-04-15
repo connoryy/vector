@@ -30,26 +30,6 @@ benchmark (file → remap → filter → blackhole).
 **Potential**: Make the tracing wrapper truly zero-cost when `TRACK_ALLOCATIONS=false`.
 **E2E relevance**: Low-Medium — this is already present in baseline, so optimizing it would help both.
 
-## Observation: Native macOS E2E runner is unreliable
-
-The native macOS runner (no Docker, no CPU pinning) shows bimodal throughput
-distributions (~208 MiB/s and ~265 MiB/s) with ~30% run-to-run variance.
-This makes it impossible to reliably detect improvements below ~10%.
-Future E2E validation should use the Docker-based runner with `cpuset` pinning,
-or the native runner needs system-level isolation (e.g., `taskpolicy`, process
-priority, background process management).
-
-## Observation: Remaining per-event overhead is dominated by VRL execution
-
-After optimizations 1-5, the remaining per-event overhead in the transform path
-is dominated by VRL program execution (parse_json, field access, condition eval).
-These live in the external `vrl` crate and cannot be optimized within Vector.
-The schema definition updates, event metadata management, and output dispatch
-are now fast (Arc clone, cached lookups, AHash). Further gains require either:
-1. Upstream VRL optimization (BTreeMap → IndexMap, etc.)
-2. Structural changes (batching, SIMD decoding, arena allocation)
-3. Non-transform-path targets (file source I/O, sink batching)
-
 ## Dismissed
 
 - **EventMetadata UUID generation**: Completed (iter 2). Lazy UUID.
@@ -57,6 +37,3 @@ are now fast (Arc clone, cached lookups, AHash). Further gains require either:
 - **BytesDeserializer direct construction**: Completed (iter 4). Direct LogEvent.
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).
-- **Schema definition lookup**: Completed (iter 16/opt 5). Single-input fast path + AHash.
-- **log_to_metric tag rendering**: Attempted (iter 5b). Pre-parsed field paths at config time. E2E showed +0.0% — tag rendering is not on the E2E critical path.
-- **LatencyRecorder per-event histogram**: Analyzed. Could batch histogram updates but would change reported event counts. Low benefit vs semantic risk.

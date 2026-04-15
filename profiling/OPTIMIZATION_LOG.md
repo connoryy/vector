@@ -15,8 +15,7 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 2 | decompose + eager cache | 200.27 | 205.62 | 205.65 | 3.10 | +5.4% | +2.6%..+5.4% | connoryy#30 |
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
-| 5 | schema def fast path + AHash | — | — | — | — | inconclusive | — | — |
-| **All** | **cumulative (stacked)** | — | — | — | — | **~+6.6%** | — | |
+| **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
 
@@ -81,19 +80,9 @@ Median: 208.02  Mean: 208.03  σ: 0.02  CV: 0.0%
 Δ median vs master: +6.6%  95% CI: [-1.8%, +14.6%]
 ```
 
-Iter 16 — schema definition fast path + AHash (branch: `connor/vector-optimized`):
-
-```text
-E2E native macOS runner (no Docker, no CPU pinning).
-Data is bimodal (~208 MiB/s and ~265 MiB/s modes) due to system interference.
-Baseline and after show same bimodal pattern — delta is within noise.
-Optimization is theoretically correct but E2E impact is too small to measure
-with the native runner's ~30% run-to-run variance.
-```
-
 ### Notes
 
-- E2E pipeline (opts 1-4): `file` source → `remap` (VRL parse_json + add fields) → `filter` (VRL condition) → `blackhole` sink
+- E2E pipeline: `file` source → `remap` (VRL parse_json + add fields) → `filter` (VRL condition) → `blackhole` sink
 - Docker image built with `CARGO_PROFILE_RELEASE_DEBUG=2` for symbol retention, jemalloc allocator
 - 4-core CPU pinning via `cpuset: "0-3"` in docker-compose
 - The wide 95% CIs are dominated by master baseline variance (σ=9.97). All optimized runs consistently exceed 200 MiB/s while master has one run at 185.73 MiB/s
@@ -138,26 +127,3 @@ Files: `lib/vector-core/Cargo.toml`, `lib/vector-core/src/transform/outputs.rs`,
 Replaces `HashMap` with `AHashMap` for `TransformOutputsBuf`. This map is
 looked up on every event dispatch. AHash is faster for short string keys
 (output names like "\_default"). `ahash` is already a transitive dependency.
-
-### Optimization 5 — schema definition fast path + AHash for schema lookups
-
-Files: `lib/vector-core/src/transform/mod.rs`, `lib/vector-core/src/transform/outputs.rs`, `src/topology/builder.rs`
-
-`update_runtime_schema_definition` is called for every event at every transform
-output. It does a `HashMap` lookup on `OutputId` (string-based key) to resolve
-the schema definition. Two improvements:
-
-1. **Single-input fast path**: ~50% of transforms have exactly one upstream input.
-   Pre-resolve the schema definition at init time and cache it on `TransformOutput`.
-   For these transforms, skip the per-event map lookup entirely.
-
-2. **AHash for schema definition maps**: Switch `log_schema_definitions` from
-   `HashMap<OutputId, Arc<Definition>>` to `AHashMap`. `OutputId` hashing involves
-   two strings (`ComponentKey.id` + optional port); `AHash` is ~3x faster than
-   `SipHash` for these keys. Applied in both `TransformOutput` (sync transforms)
-   and the task transform runner in `topology/builder.rs`.
-
-E2E impact is theoretically small (~0.1%) because the per-lookup savings (~20-30ns)
-are a tiny fraction of per-event work (~120ns total per transform pass). The native
-macOS E2E runner cannot reliably detect this; Docker-based validation with CPU
-pinning would be needed for confirmation.
