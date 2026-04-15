@@ -1,16 +1,31 @@
+use std::sync::LazyLock;
+
 use bytes::Bytes;
 use lookup::OwnedTargetPath;
+use lookup::lookup_v2::OwnedSegment;
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use vector_core::{
     config::{DataType, LogNamespace, log_schema},
-    event::{Event, LogEvent},
+    event::{Event, EventMetadata, KeyString, LogEvent, ObjectMap, Value},
     schema,
     schema::meaning,
 };
 use vrl::value::Kind;
 
 use super::Deserializer;
+
+/// Cached message key extracted from `log_schema()` for direct BTreeMap construction.
+/// Avoids per-event path traversal and `Arc::make_mut` overhead in the Legacy namespace
+/// deserialization path.
+static LEGACY_MESSAGE_KEY: LazyLock<Option<KeyString>> = LazyLock::new(|| {
+    log_schema()
+        .message_key()
+        .and_then(|path| match path.segments.first() {
+            Some(OwnedSegment::Field(key)) => Some(key.clone()),
+            _ => None,
+        })
+});
 
 /// Config used to build a `BytesDeserializer`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -67,9 +82,16 @@ impl BytesDeserializer {
         match log_namespace {
             LogNamespace::Vector => log_namespace.new_log_from_data(bytes),
             LogNamespace::Legacy => {
-                let mut log = LogEvent::default();
-                log.maybe_insert(log_schema().message_key_target_path(), bytes);
-                log
+                // Construct the BTreeMap directly instead of going through
+                // LogEvent::default() + value_mut() + insert(). This avoids:
+                //   1. Arc::make_mut clone of the shared DEFAULT_INNER
+                //   2. Path traversal overhead in Value::insert
+                //   3. Size cache invalidation
+                let mut map = ObjectMap::new();
+                if let Some(key) = LEGACY_MESSAGE_KEY.as_ref() {
+                    map.insert(key.clone(), Value::Bytes(bytes));
+                }
+                LogEvent::from_map(map, EventMetadata::default())
             }
         }
     }
