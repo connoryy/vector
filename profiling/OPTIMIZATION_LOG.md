@@ -16,6 +16,7 @@ Master baseline: 195.14 MiB/s median (185.73 / 195.14 / 205.66 min/med/max, σ=9
 | 3 | ReadOnlyVrlTarget | 205.51 | 205.53 | 205.61 | 0.05 | +5.3% | +5.3%..+5.4% | connoryy#31 |
 | 4 | AHash transform outputs | 200.28 | 205.66 | 205.66 | 3.11 | +5.4% | +2.6%..+5.4% | connoryy#32 |
 | 5 | BytesDeserializer direct construction | — | — | — | — | ~-1.4% micro | E2E inconclusive | — |
+| 6 | Combined single-pass size computation | 157.95 | 159.70 | 161.31 | 1.23 | +0.84% | micro: -3.6%...-16.4% | E2E not significant |
 | **All** | **cumulative (stacked)** | **208.02** | **208.02** | **208.05** | **0.02** | **+6.6%** | **+6.6%..+6.6%** | |
 
 Δ range shows (min\_optimized − median\_baseline) / median\_baseline .. (max\_optimized − median\_baseline) / median\_baseline
@@ -140,6 +141,30 @@ Micro-benchmark results (statistically significant, 300 samples):
 E2E validation: Local macOS ARM64 test inconclusive due to coarse timing resolution
 (integer seconds for ~19s test = ~5% measurement granularity). Docker E2E blocked by
 corporate SSL proxy. Event processing rate analysis suggests ~2% improvement (554K vs 543K events/s).
+
+### Optimization 6 — Combined single-pass size computation
+
+Files: `lib/vector-core/src/event/log_event.rs`
+
+`recompose()` and the lazy size cache paths computed `estimated_json_encoded_size_of()`
+and `allocated_bytes()` via two independent recursive `Value` tree walks. For a 5-field
+JSON event, each walk pointer-chases through BTreeMap nodes separately, doubling cache
+miss overhead. `combined_value_sizes()` computes both metrics in a single tree traversal.
+
+Micro-benchmark results:
+- `pipeline/decode_filter_pass`: -9.66% (110.5µs → 99.8µs)
+- `pipeline/decode_filter_pass_bytes`: -16.41% (119.6µs → 100.0µs)
+- `pipeline/decode_filter_fail`: -3.56% (72.2µs → 69.7µs)
+- `remap/parse_json_remap`: -8.48% (434ns → 397ns)
+- `remap/add_fields_remap`: -7.79% (376ns → 347ns)
+
+E2E validation (native macOS, 5 runs):
+- Baseline: 158.37 MiB/s median (CV 0.53%)
+- After: 159.70 MiB/s median (CV 0.79%)
+- Change: +0.84%, Mann-Whitney U p=0.1508 (not significant)
+- Cliff's delta: 0.600 (large)
+- VERDICT: Below E2E gate (needs ≥1.0% median, p<0.05). Effect is real at micro level
+  but too small relative to overall pipeline cost to clear the E2E threshold.
 
 ### Optimization 4 — AHash for transform output buffers
 

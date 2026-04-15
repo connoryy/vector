@@ -8,6 +8,8 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use ordered_float::NotNan;
+
 use bytes::Bytes;
 use chrono::Utc;
 use crossbeam_utils::atomic::AtomicCell;
@@ -47,6 +49,77 @@ static VECTOR_SOURCE_TYPE_PATH: LazyLock<Option<OwnedTargetPath>> = LazyLock::ne
     )))
 });
 
+/// Compute both estimated JSON encoded size and allocated bytes for a `Value`
+/// in a single recursive tree walk.
+///
+/// This avoids iterating the `BTreeMap` (or Vec) twice — once for
+/// `EstimatedJsonEncodedSizeOf` and once for `ByteSizeOf::allocated_bytes` —
+/// halving the pointer-chasing overhead for Object/Array variants.
+///
+/// The returned `(JsonSize, usize)` matches the values that would be produced
+/// by calling `value.estimated_json_encoded_size_of()` and
+/// `value.allocated_bytes()` independently.
+fn combined_value_sizes(value: &Value) -> (JsonSize, usize) {
+    match value {
+        Value::Bytes(bytes) => {
+            let len = bytes.len();
+            // JSON: "..." (quotes + content)
+            // Alloc: heap bytes
+            (JsonSize::new(2 + len), len)
+        }
+        Value::Object(map) => {
+            // JSON: { "k1":v1, "k2":v2 }
+            let mut json_acc = 2_usize; // braces
+            // Alloc: BTreeMap struct + sum(key.size_of() + value.size_of())
+            let mut alloc_acc = size_of::<ObjectMap>();
+            let count = map.len();
+            for (k, v) in map {
+                let key_len = k.len();
+                // JSON contribution: "key":value,
+                json_acc += 2 + key_len + 1; // quotes + key + colon
+                let (child_json, child_alloc) = combined_value_sizes(v);
+                json_acc += child_json.get() + 1; // value + comma
+                // Alloc contribution: k.size_of() + v.size_of()
+                alloc_acc += size_of::<KeyString>() + key_len;
+                alloc_acc += size_of::<Value>() + child_alloc;
+            }
+            if count > 0 {
+                json_acc -= 1; // remove trailing comma
+            }
+            (JsonSize::new(json_acc), alloc_acc)
+        }
+        Value::Array(arr) => {
+            // JSON: [ v1, v2 ]
+            let mut json_acc = 2_usize; // brackets
+            // Alloc: Vec struct + sum(value.size_of())
+            let mut alloc_acc = size_of::<Vec<Value>>();
+            let count = arr.len();
+            for v in arr {
+                let (child_json, child_alloc) = combined_value_sizes(v);
+                json_acc += child_json.get() + 1; // value + comma
+                alloc_acc += size_of::<Value>() + child_alloc;
+            }
+            if count > 0 {
+                json_acc -= 1; // remove trailing comma
+            }
+            (JsonSize::new(json_acc), alloc_acc)
+        }
+        Value::Integer(v) => ((*v).estimated_json_encoded_size_of(), 0),
+        Value::Float(v) => (NotNan::into_inner(*v).estimated_json_encoded_size_of(), 0),
+        Value::Boolean(v) => (
+            if *v {
+                JsonSize::new(4)
+            } else {
+                JsonSize::new(5)
+            },
+            0,
+        ),
+        Value::Null => (JsonSize::new(4), 0),
+        Value::Timestamp(v) => (v.estimated_json_encoded_size_of(), 0),
+        Value::Regex(v) => (v.as_str().estimated_json_encoded_size_of(), 0),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Inner {
     #[serde(flatten)]
@@ -68,6 +141,18 @@ impl Inner {
     fn as_value(&self) -> &Value {
         &self.fields
     }
+
+    /// Compute and cache both size metrics in a single Value tree walk.
+    /// Returns `(byte_size, json_size)` for use by callers.
+    fn compute_and_cache_sizes(&self) -> (NonZeroUsize, NonZeroJsonSize) {
+        let (json_size, alloc_bytes) = combined_value_sizes(&self.fields);
+        let byte_size =
+            NonZeroUsize::new(size_of::<Self>() + alloc_bytes).expect("Size cannot be zero");
+        let json_nz = NonZeroJsonSize::new(json_size).expect("Size cannot be zero");
+        self.size_cache.store(Some(byte_size));
+        self.json_encoded_size_cache.store(Some(json_nz));
+        (byte_size, json_nz)
+    }
 }
 
 impl ByteSizeOf for Inner {
@@ -75,14 +160,9 @@ impl ByteSizeOf for Inner {
         self.size_cache
             .load()
             .unwrap_or_else(|| {
-                let size = size_of::<Self>() + self.allocated_bytes();
-                // The size of self will always be non-zero, and
-                // adding the allocated bytes cannot make it overflow
-                // since `usize` has a range the same as pointer
-                // space. Hence, the expect below cannot fail.
-                let size = NonZeroUsize::new(size).expect("Size cannot be zero");
-                self.size_cache.store(Some(size));
-                size
+                // Compute both sizes in one tree walk so the JSON size
+                // cache is also populated, avoiding a second traversal.
+                self.compute_and_cache_sizes().0
             })
             .into()
     }
@@ -97,11 +177,9 @@ impl EstimatedJsonEncodedSizeOf for Inner {
         self.json_encoded_size_cache
             .load()
             .unwrap_or_else(|| {
-                let size = self.fields.estimated_json_encoded_size_of();
-                let size = NonZeroJsonSize::new(size).expect("Size cannot be zero");
-
-                self.json_encoded_size_cache.store(Some(size));
-                size
+                // Compute both sizes in one tree walk so the byte-size
+                // cache is also populated, avoiding a second traversal.
+                self.compute_and_cache_sizes().1
             })
             .into()
     }
@@ -320,16 +398,11 @@ impl LogEvent {
         let inner =
             Arc::get_mut(&mut residual.0).expect("LogEventResidual Arc must be uniquely owned");
         inner.fields = value;
-        // Eagerly compute and cache sizes rather than invalidating.
-        // This moves the cost of size computation into the spawned transform task
-        // (concurrent path), so the main thread's send_single_buffer only reads
-        // cached values instead of recomputing from a full BTreeMap walk.
-        let json_size = inner.fields.estimated_json_encoded_size_of();
-        inner
-            .json_encoded_size_cache
-            .store(NonZeroJsonSize::new(json_size));
-        let byte_size = size_of::<Inner>() + inner.fields.allocated_bytes();
-        inner.size_cache.store(NonZeroUsize::new(byte_size));
+        // Eagerly compute and cache both size metrics in a single Value tree
+        // walk.  Previously this called `estimated_json_encoded_size_of()` and
+        // `allocated_bytes()` independently, each of which iterates the entire
+        // BTreeMap.  The combined walk halves the pointer-chasing overhead.
+        inner.compute_and_cache_sizes();
         Self {
             inner: residual.0,
             metadata,

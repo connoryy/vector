@@ -11,13 +11,7 @@ benchmark (file → remap → filter → blackhole).
 **Potential**: Replace `BTreeMap<KeyString, Value>` with `IndexMap` or `SmallVec`-based map for the Object variant. Or optimize Vector's call patterns to reduce insertions.
 **E2E relevance**: High — every event goes through VRL parse_json which constructs a BTreeMap.
 
-## Priority 2: CharacterDelimitedDecoder::decode hot loop
-
-**Source**: 8-11% of codecs suite CPU. Processes ~75K frames per iteration.
-**Potential**: Optimize framing loop, reduce per-frame `buf.split_to(idx).freeze()` overhead, batch event creation.
-**E2E relevance**: Medium — the file source uses newline-delimited decoding in the E2E pipeline.
-
-## Priority 3: Memory allocation pressure (systemic)
+## Priority 2: Memory allocation pressure (systemic)
 
 **Source**: `_xzm_free` at 15-19%, `_xzm_xzone_malloc` at 3-4% in event suite.
 **Potential**: Pool/arena allocators for short-lived event processing, structural changes to reduce heap allocations.
@@ -37,3 +31,5 @@ benchmark (file → remap → filter → blackhole).
 - **BytesDeserializer direct construction**: Completed (iter 5). Direct BTreeMap construction + LazyLock message key cache. Micro-benchmarks: -1.42% remap/add_fields_remap (p=0.0000). E2E inconclusive (coarse timing).
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).
+- **Combined single-pass size computation**: Completed (iter 6). Merged `estimated_json_encoded_size_of()` and `allocated_bytes()` into single `combined_value_sizes()` tree walk. Strong micro-benchmarks (-3.6% to -16.4% pipeline) but E2E only +0.84% (p=0.15, not significant). The size computation overhead is too small a fraction of total pipeline time to clear the 1.0% E2E gate.
+- **CharacterDelimitedDecoder hot loop**: Investigated (iter 6). Already well-optimized — uses SIMD memchr, efficient BytesMut::split_to/freeze. No viable optimization found.
