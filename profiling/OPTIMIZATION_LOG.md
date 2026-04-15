@@ -152,6 +152,7 @@ JSON event, each walk pointer-chases through BTreeMap nodes separately, doubling
 miss overhead. `combined_value_sizes()` computes both metrics in a single tree traversal.
 
 Micro-benchmark results:
+
 - `pipeline/decode_filter_pass`: -9.66% (110.5µs → 99.8µs)
 - `pipeline/decode_filter_pass_bytes`: -16.41% (119.6µs → 100.0µs)
 - `pipeline/decode_filter_fail`: -3.56% (72.2µs → 69.7µs)
@@ -159,6 +160,7 @@ Micro-benchmark results:
 - `remap/add_fields_remap`: -7.79% (376ns → 347ns)
 
 E2E validation (native macOS, 5 runs):
+
 - Baseline: 158.37 MiB/s median (CV 0.53%)
 - After: 159.70 MiB/s median (CV 0.79%)
 - Change: +0.84%, Mann-Whitney U p=0.1508 (not significant)
