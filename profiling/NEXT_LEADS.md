@@ -33,7 +33,7 @@ benchmark (file → remap → filter → blackhole).
 ## Dismissed
 
 - **EventMetadata UUID generation**: Completed (iter 2). Lazy UUID.
-- **Arc<Inner> caching**: Completed (iter 3). LazyLock DEFAULT_INNER.
+- **Arc<Inner> caching**: Completed (iter 5). LazyLock DEFAULT_INNER + moved source_id/source_type out of Arc. +2.1% E2E (native).
 - **BytesDeserializer direct construction**: Completed (iter 4). Direct LogEvent.
 - **Dedupe build_cache_entry**: Low E2E impact — dedupe not in the E2E pipeline.
 - **Arc::drop_slow**: Addressed indirectly by decompose/recompose (fewer Arc allocs).
