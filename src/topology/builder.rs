@@ -17,6 +17,7 @@ use tokio::{
 };
 use tracing::Instrument;
 use vector_lib::config::LogNamespace;
+use vector_lib::finalization::Finalizable;
 use vector_lib::internal_event::{
     self, CountByteSize, EventsSent, InternalEventHandle as _, Registered,
 };
@@ -611,6 +612,16 @@ impl<'a> Builder<'a> {
                 extra_context: self.extra_context.clone(),
             };
 
+            // Determine whether this sink has end-to-end acknowledgements enabled.
+            // If NOT enabled, we strip finalizers from events entering this sink so that
+            // the source's BatchNotifier doesn't wait for this sink to finish processing.
+            // This allows ack-enabled sinks to resolve independently of non-ack sinks.
+            let sink_acks_enabled = sink
+                .inner
+                .acknowledgements()
+                .merge_default(&self.config.global.acknowledgements)
+                .enabled();
+
             let (sink, healthcheck) = match sink.inner.build(cx).await {
                 Err(error) => {
                     self.errors.push(format!("Sink \"{key}\": {error}"));
@@ -646,6 +657,22 @@ impl<'a> Builder<'a> {
                 sink.run(
                     rx.by_ref()
                         .filter(|events: &EventArray| ready(filter_events_type(events, input_type)))
+                        .map(move |mut events: EventArray| {
+                            // For sinks without acknowledgements enabled, strip finalizers
+                            // from all events. This drops the Arc<EventFinalizer> references
+                            // immediately, allowing the source's BatchNotifier to resolve
+                            // as soon as all ack-enabled sinks have finished — without
+                            // waiting for this non-ack sink.
+                            //
+                            // The stripped finalizers are dropped here, which calls
+                            // EventFinalizer::drop -> update_batch(Dropped). Since Dropped
+                            // is a no-op update to BatchStatus, this has no effect on the
+                            // final batch status.
+                            if !sink_acks_enabled {
+                                let _ = events.take_finalizers();
+                            }
+                            events
+                        })
                         .inspect(|events| {
                             events_received.emit(CountByteSize(
                                 events.len(),
