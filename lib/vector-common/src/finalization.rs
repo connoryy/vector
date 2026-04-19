@@ -91,18 +91,7 @@ impl EventFinalizers {
     }
 
     /// Merges the event finalizers from `other` into the collection.
-    ///
-    /// Fast-path: when `other` has exactly one finalizer that matches the first
-    /// entry already in `self` (same Arc pointer), it is skipped. This collapses
-    /// 1000 shared-finalizer events into 1 entry instead of 1000 duplicate Arcs.
-    /// The check is O(1) regardless of collection size.
     pub fn merge(&mut self, other: Self) {
-        if other.0.len() == 1
-            && !self.0.is_empty()
-            && Arc::ptr_eq(&self.0[0], &other.0[0])
-        {
-            return;
-        }
         self.0.extend(other.0);
     }
 
