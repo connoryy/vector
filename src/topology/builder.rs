@@ -25,7 +25,6 @@ use vector_lib::{
             channel::{BufferReceiver, BufferSender, ChannelMetricMetadata, LimitedReceiver},
         },
     },
-    config::LogNamespace,
     finalization::Finalizable,
     internal_event::{self, CountByteSize, EventsSent, InternalEventHandle as _, Registered},
     latency::LatencyRecorder,

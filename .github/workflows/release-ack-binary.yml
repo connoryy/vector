@@ -3,9 +3,9 @@ name: Build and release ack binary
 on:
   push:
     tags:
-      - 'ack-v*'
+      - "ack-v*"
     branches:
-      - 'connor/k8s-logs-acks-v049'
+      - "connor/k8s-logs-acks-v049"
   workflow_dispatch:
 
 jobs:
