@@ -758,6 +758,7 @@ impl Source {
             use_apiserver_cache: config.use_apiserver_cache,
             ingestion_timestamp_field,
             delay_deletion,
+            insert_namespace_fields: config.insert_namespace_fields,
             include_file_metric_tag: config.internal_metrics.include_file_tag,
             rotate_wait: config.rotate_wait,
             acknowledgements,

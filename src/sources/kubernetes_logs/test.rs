@@ -1052,6 +1052,7 @@ mod tests {
                         schema: Default::default(),
                         extra_context: ExtraContext::single_value(logs_dir.to_owned()),
                         enrichment_tables: Default::default(),
+                        metrics_storage: Default::default(),
                     },
                     client,
                 )
