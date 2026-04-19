@@ -2,13 +2,13 @@
 mod tests {
     use bytes::Bytes;
     use chrono::Utc;
-    use futures::{pin_mut, FutureExt, StreamExt};
+    use futures::{FutureExt, StreamExt, pin_mut};
     use http_1::{Request, Response};
     use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
     use kube::{
+        Client,
         api::{ListMeta, ObjectList, TypeMeta, WatchEvent},
         client::Body,
-        Client,
     };
     use similar_asserts::assert_eq;
     use std::{
@@ -18,27 +18,27 @@ mod tests {
         path::{Path, PathBuf},
     };
     use tempfile::tempdir;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
     use tower_test::mock::{Handle, SendResponse};
     use vector_lib::{
         codecs::BytesDeserializerConfig,
         config::{
-            log_schema, AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace,
-            SourceAcknowledgementsConfig, SourceOutput,
+            AcknowledgementsConfig, DataType, GlobalOptions, LegacyKey, LogNamespace,
+            SourceAcknowledgementsConfig, SourceOutput, log_schema,
         },
         id::ComponentKey,
-        lookup::{owned_value_path, OwnedTargetPath},
+        lookup::{OwnedTargetPath, owned_value_path},
         schema::Definition,
     };
-    use vrl::value::{kind::Collection, Kind};
+    use vrl::value::{Kind, kind::Collection};
 
     use crate::{
+        SourceSender,
         config::{SourceConfigTest, SourceContext},
         event::{Event, EventStatus},
         extra_context::ExtraContext,
         shutdown::ShutdownSignal,
-        test_util::components::{assert_source_compliance, SOURCE_TAGS},
-        SourceSender,
+        test_util::components::{SOURCE_TAGS, assert_source_compliance},
     };
 
     use super::super::Config;

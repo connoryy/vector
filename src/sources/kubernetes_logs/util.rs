@@ -29,22 +29,14 @@ where
     <C as Sink<Vec<Line>>>::Error: Error + Send,
     S: Future + Unpin + Send + 'static,
     <S as Future>::Output: Clone + Send + Sync,
-<<<<<<< HEAD
     S2: Future + Unpin + Send + 'static,
     <S2 as Future>::Output: Clone + Send + Sync,
-{
-    let span = info_span!("file_server");
-    let join_handle = spawn_blocking(move || {
-=======
     <<PP as PathsProvider>::IntoIter as IntoIterator>::IntoIter: Send,
 {
     let span = info_span!("file_server");
 
     // spawn_blocking shouldn't be needed: https://github.com/vectordotdev/vector/issues/23743
     let join_handle = tokio::task::spawn_blocking(move || {
-        // These will need to be separated when this source is updated
-        // to support end-to-end acknowledgements.
->>>>>>> origin/master
         let shutdown = shutdown.shared();
         let shutdown2 = shutdown2.shared();
         let _enter = span.enter();

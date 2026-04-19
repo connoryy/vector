@@ -563,7 +563,6 @@ zst
 zstandard
 ZTE
 Zync
-<<<<<<< HEAD
 envsubst
 jimmystewpot
 esensar
@@ -573,7 +572,6 @@ jlambatl
 jorgehermo9
 notchairmk
 yjagdale
-=======
 sighup
 CPPFLAGS
 LDFLAGS
@@ -583,4 +581,3 @@ CLAUDE
 grpcurl
 linting
 lexers
->>>>>>> origin/master

@@ -21,31 +21,20 @@ use kube::{
 };
 use lifecycle::Lifecycle;
 use serde_with::serde_as;
-<<<<<<< HEAD
 use tokio::sync::oneshot;
-use vector_lib::codecs::{BytesDeserializer, BytesDeserializerConfig};
-use vector_lib::configurable::configurable_component;
-use vector_lib::event::{BatchNotifier, BatchStatus};
-use vector_lib::file_source::{
-    calculate_ignore_before, Checkpointer, FileServer, FileServerShutdown, FingerprintStrategy,
-    Fingerprinter, Line, ReadFrom, ReadFromConfig,
-};
-use vector_lib::finalizer::OrderedFinalizer;
-use vector_lib::lookup::{lookup_v2::OptionalTargetPath, owned_value_path, path, OwnedTargetPath};
-use vector_lib::{config::LegacyKey, config::LogNamespace, EstimatedJsonEncodedSizeOf};
-=======
->>>>>>> origin/master
 use vector_lib::{
     EstimatedJsonEncodedSizeOf, TimeZone,
     codecs::{BytesDeserializer, BytesDeserializerConfig},
     config::{LegacyKey, LogNamespace},
     configurable::configurable_component,
+    event::{BatchNotifier, BatchStatus},
     file_source::file_server::{
         FileServer, Line, Shutdown as FileServerShutdown, calculate_ignore_before,
     },
     file_source_common::{
         Checkpointer, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
     },
+    finalizer::OrderedFinalizer,
     internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol},
     lookup::{OwnedTargetPath, lookup_v2::OptionalTargetPath, owned_value_path, path},
 };
@@ -55,13 +44,8 @@ use crate::{
     SourceSender,
     built_info::{PKG_NAME, PKG_VERSION},
     config::{
-<<<<<<< HEAD
-        log_schema, ComponentKey, DataType, GenerateConfig, GlobalOptions,
-        SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
-=======
-        ComponentKey, DataType, GenerateConfig, GlobalOptions, SourceConfig, SourceContext,
-        SourceOutput, log_schema,
->>>>>>> origin/master
+        ComponentKey, DataType, GenerateConfig, GlobalOptions, SourceAcknowledgementsConfig,
+        SourceConfig, SourceContext, SourceOutput, log_schema,
     },
     event::Event,
     internal_events::{
@@ -74,11 +58,8 @@ use crate::{
     serde::bool_or_struct,
     shutdown::ShutdownSignal,
     sources,
-<<<<<<< HEAD
     sources::file::FinalizerEntry,
-=======
     sources::kubernetes_logs::partial_events_merger::merge_partial_events,
->>>>>>> origin/master
     transforms::{FunctionTransform, OutputBuffer},
 };
 

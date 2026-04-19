@@ -6,8 +6,6 @@ releases: "0.49.0": {
 
 	whats_next: []
 
-<<<<<<< HEAD
-=======
 	known_issues: [
 		"""
 			The protobuf codecs do not support all telemetry types. Specifically, the following applies:
@@ -33,7 +31,6 @@ releases: "0.49.0": {
 			""",
 	]
 
->>>>>>> origin/master
 	description: """
 		The Vector team is excited to announce version `0.49.0`!
 
@@ -45,10 +42,7 @@ releases: "0.49.0": {
 		- The `http` sink's `uri` and `request.headers` config fields now support templating, enabling dynamic construction based on event data.
 		- The `--watch-config` flag now also watches for changes in enrichment table files.
 		- Fixed a race condition that could cause negative values in the `vector_buffer_byte_size` and `vector_buffer_events` gauges.
-<<<<<<< HEAD
-=======
 		- The `prometheus_remote_write` sink now offers a `expire_metrics_secs` config option. This fixes an issue where incremental metrics were preserved for the lifetime of Vector's runtime causing indefinite memory growth.
->>>>>>> origin/master
 		"""
 
 	changelog: [
@@ -76,11 +70,7 @@ releases: "0.49.0": {
 		{
 			type: "fix"
 			description: """
-<<<<<<< HEAD
-				The `utilization` metric is now properly published periodically, even when no events are flowing through the components.
-=======
 				The `utilization` metric is now properly published periodically, even when there are no events flowing through the components.
->>>>>>> origin/master
 				"""
 			contributors: ["esensar", "Quad9DNS"]
 		},
@@ -94,11 +84,7 @@ releases: "0.49.0": {
 		{
 			type: "enhancement"
 			description: """
-<<<<<<< HEAD
-				The [enrichment functions](https://vector.dev/docs/reference/vrl/functions/#enrichment-functions) now support an optional wildcard parameter where a match will succeed if the field value equals either the wildcard or the actual comparison value.
-=======
 				The [enrichment functions](https://vector.dev/docs/reference/vrl/functions/#enrichment-functions) now support an optional wildcard parameter where a match succeeds if the field value equals either the wildcard or the actual comparison value.
->>>>>>> origin/master
 				"""
 			contributors: ["nzxwang"]
 		},
@@ -134,11 +120,7 @@ releases: "0.49.0": {
 		{
 			type: "fix"
 			description: """
-<<<<<<< HEAD
-				The `nats` sink now does not return an error when an unresolvable or unavailable URL is provided. Note that if `--require-healthy` is set then Vector will stop on startup.
-=======
-				The `nats` sink now does not return an error when an unresolvable or unavailable URL is provided.**Note**: If `--require-healthy` is set, Vector stops on startup.
->>>>>>> origin/master
+				The `nats` sink now does not return an error when an unresolvable or unavailable URL is provided. **Note**: If `--require-healthy` is set, Vector stops on startup.
 				"""
 			contributors: ["rdwr-tomers"]
 		},
@@ -180,11 +162,7 @@ releases: "0.49.0": {
 		{
 			type: "feat"
 			description: """
-<<<<<<< HEAD
-				Added `time_settings` configuration to the `dedupe` transform, allowing the `max_age` of items in the deduplication cache to be set. This helps distinguish between true duplicates and expected repetition in data over longer periods.
-=======
 				Added `time_settings` configuration to the `dedupe` transform, allowing the `max_age` of items in the deduplication cache to be set. This helps distinguish between true duplicates and expected repetition in data over longer periods of time.
->>>>>>> origin/master
 				"""
 			contributors: ["esensar", "Quad9DNS"]
 		},
@@ -192,11 +170,7 @@ releases: "0.49.0": {
 			type: "enhancement"
 			description: """
 				The `nats` sink now supports message headers when publishing to JetStream.
-<<<<<<< HEAD
-				
-=======
 
->>>>>>> origin/master
 				It introduces a configurable, templated Nats-Msg-Id header that ensures a unique ID for each message. This enables broker-level deduplication, resulting in stronger delivery guarantees and exactly-once semantics when combined with idempotent consumers.
 				"""
 			contributors: ["benjamin-awd"]
@@ -246,11 +220,7 @@ releases: "0.49.0": {
 		{
 			type: "feat"
 			description: """
-<<<<<<< HEAD
 				The `request_retry_partial` behavior for the `elasticsearch` sink was changed. Now only the failed retriable requests in a bulk will be retried (instead of all requests in the bulk).
-=======
-				The `request_retry_partial` behavior for the `elasticsearch` sink was changed. Now only the failed retriable requests in a bulk is retried (instead of all requests).
->>>>>>> origin/master
 				"""
 			contributors: ["Serendo"]
 		},
@@ -308,11 +278,7 @@ releases: "0.49.0": {
 		{
 			type: "enhancement"
 			description: """
-<<<<<<< HEAD
-				The `UnsignedIntTemplate` now supports `strftime` formatting. For example, this `%Y%m%d%H` template will evaluate timestamps to a number.
-=======
 				The `UnsignedIntTemplate` now supports `strftime` formatting. For example, this `%Y%m%d%H` template evaluates timestamps to a number.
->>>>>>> origin/master
 				"""
 			contributors: ["5Dev24"]
 		},
@@ -320,15 +286,10 @@ releases: "0.49.0": {
 
 	vrl_changelog: """
 		### 0.26.0
-<<<<<<< HEAD
-		
-		#### Breaking Changes & Upgrade Guide
-		
-=======
 
 		#### Breaking Changes & Upgrade Guide
 
->>>>>>> origin/master
+
 		- The `parse_cef` now trims unnecessary whitespace around escaped values in both headers and extension fields, improving accuracy and reliability when dealing with messy input strings.
 			authors: yjagdale (https://github.com/vectordotdev/vrl/pull/1430)
 
@@ -338,15 +299,6 @@ releases: "0.49.0": {
 
 		- `encode_lz4`  no longer prepends the uncompressed size by default, improving compatibility with standard LZ4 tools. A new `prepend_size` flag restores the old behavior if needed. Also, `decode_lz4` now also accepts `prepend_size` and a `buf_size` option (default: 1MB).
 			authors: jlambatl (https://github.com/vectordotdev/vrl/pull/1447)
-<<<<<<< HEAD
-		
-		#### New Features
-		
-		- Added `haversine` function for calculating [haversine](https://en.wikipedia.org/wiki/Haversine_formula) distance and bearing.
-			authors: esensar Quad9DNS (https://github.com/vectordotdev/vrl/pull/1442)
-
-		- Add `validate_json_schema` function for validating JSON payloads against JSON schema files. A optional configuration parameter `ignore_unknown_formats` is provided to change how custom formats are handled by the validator. Unknown formats can be silently ignored by setting this to `true` and validation continues without failing due to those fields.
-=======
 
 		#### New Features
 
@@ -354,7 +306,6 @@ releases: "0.49.0": {
 			authors: esensar Quad9DNS (https://github.com/vectordotdev/vrl/pull/1442)
 
 		- Add `validate_json_schema` function for validating JSON payloads against JSON schema files. An optional configuration parameter `ignore_unknown_formats` is provided to change how custom formats are handled by the validator. Unknown formats can be silently ignored by setting this to `true` and validation continues without failing due to those fields.
->>>>>>> origin/master
 			authors: jlambatl (https://github.com/vectordotdev/vrl/pull/1443)
 		"""
 

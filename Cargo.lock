@@ -8318,17 +8318,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
-<<<<<<< HEAD
- "itertools 0.11.0",
- "proc-macro2 1.0.95",
- "quote 1.0.40",
- "syn 2.0.104",
-=======
  "itertools 0.10.5",
  "proc-macro2 1.0.106",
  "quote 1.0.44",
  "syn 2.0.117",
->>>>>>> origin/master
 ]
 
 [[package]]
