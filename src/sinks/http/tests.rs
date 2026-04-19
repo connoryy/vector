@@ -2,22 +2,28 @@
 
 use std::{
     future::ready,
-    sync::{atomic, Arc},
+    sync::{Arc, atomic},
 };
 
 use bytes::{Buf, Bytes};
-use flate2::{read::MultiGzDecoder, read::ZlibDecoder};
+use flate2::read::{MultiGzDecoder, ZlibDecoder};
 use futures::stream;
 use headers::{Authorization, HeaderMapExt};
 use hyper::{Body, Method, Response, StatusCode};
-use serde::{de, Deserialize};
-use vector_lib::codecs::{
-    encoding::{Framer, FramingConfig},
-    JsonSerializerConfig, NewlineDelimitedEncoderConfig, TextSerializerConfig,
+use serde::{Deserialize, de};
+use vector_lib::{
+    codecs::{
+        JsonSerializerConfig, NewlineDelimitedEncoderConfig, TextSerializerConfig,
+        encoding::{Framer, FramingConfig},
+    },
+    event::{BatchNotifier, BatchStatus, Event, LogEvent},
+    finalization::AddBatchNotifier,
 };
-use vector_lib::event::{BatchNotifier, BatchStatus, Event, LogEvent};
-use vector_lib::finalization::AddBatchNotifier;
 
+use super::{
+    config::{HttpSinkConfig, validate_headers, validate_payload_wrapper},
+    encoder::HttpEncoder,
+};
 use crate::{
     assert_downcast_matches,
     codecs::{EncodingConfigWithFraming, SinkType},
@@ -34,18 +40,13 @@ use crate::{
         },
     },
     test_util::{
+        addr::next_addr,
         components::{
-            self, init_test, run_and_assert_sink_compliance, run_and_assert_sink_error_with_events,
-            COMPONENT_ERROR_TAGS, HTTP_SINK_TAGS,
+            self, COMPONENT_ERROR_TAGS, HTTP_SINK_TAGS, init_test, run_and_assert_sink_compliance,
+            run_and_assert_sink_error_with_events,
         },
-        create_events_batch_with_fn, next_addr, random_lines_with_stream,
+        create_events_batch_with_fn, random_lines_with_stream,
     },
-};
-
-use super::{
-    config::HttpSinkConfig,
-    config::{validate_headers, validate_payload_wrapper},
-    encoder::HttpEncoder,
 };
 
 #[test]
@@ -58,7 +59,6 @@ fn default_cfg(encoding: EncodingConfigWithFraming) -> HttpSinkConfig {
         uri: Default::default(),
         method: Default::default(),
         auth: Default::default(),
-        headers: Default::default(),
         compression: Default::default(),
         encoding,
         payload_prefix: Default::default(),
@@ -506,7 +506,7 @@ async fn json_compression(compression: &str) {
     components::assert_sink_compliance(&HTTP_SINK_TAGS, async {
         let num_lines = 1000;
 
-        let in_addr = next_addr();
+        let (_guard, in_addr) = next_addr();
 
         let config = r#"
         uri = "http://$IN_ADDR/frames"
@@ -565,7 +565,7 @@ async fn json_compression_with_payload_wrapper(compression: &str) {
     components::assert_sink_compliance(&HTTP_SINK_TAGS, async {
         let num_lines = 1000;
 
-        let in_addr = next_addr();
+        let (_guard, in_addr) = next_addr();
 
         let config = r#"
         uri = "http://$IN_ADDR/frames"
@@ -635,7 +635,7 @@ async fn templateable_uri_path() {
     let num_events_per_id = 100;
     let an_id = 1;
     let another_id = 2;
-    let in_addr = next_addr();
+    let (_guard, in_addr) = next_addr();
 
     let config = format!(
         r#"
@@ -706,7 +706,7 @@ async fn templateable_uri_auth() {
     let a_pass = "a_pass";
     let another_user = "another_user";
     let another_pass = "another_pass";
-    let in_addr = next_addr();
+    let (_guard, in_addr) = next_addr();
     let config = format!(
         r#"
         uri = "http://{{{{user}}}}:{{{{pass}}}}@{in_addr}/"
@@ -774,7 +774,7 @@ async fn templateable_uri_auth() {
 async fn missing_field_in_uri_template() {
     init_test();
 
-    let in_addr = next_addr();
+    let (_guard, in_addr) = next_addr();
     let config = format!(
         r#"
         uri = "http://{in_addr}/{{{{missing_field}}}}"
@@ -819,7 +819,7 @@ async fn missing_field_in_uri_template() {
 async fn http_uri_auth_conflict() {
     init_test();
 
-    let in_addr = next_addr();
+    let (_guard, in_addr) = next_addr();
     let config = format!(
         r#"
         uri = "http://user:pass@{in_addr}/"
@@ -842,7 +842,7 @@ async fn http_uri_auth_conflict() {
 
     tokio::spawn(server);
 
-    let expected_emitted_error_events = ["ServiceCallError", "SinkRequestBuildError"];
+    let expected_emitted_error_events = ["CallError", "SinkRequestBuildError"];
     run_and_assert_sink_error_with_events(
         sink,
         stream::once(ready(event)),
@@ -914,7 +914,7 @@ async fn run_sink_with_events(
 }
 
 async fn build_sink(extra_config: &str) -> (std::net::SocketAddr, crate::sinks::VectorSink) {
-    let in_addr = next_addr();
+    let (_guard, in_addr) = next_addr();
 
     let config = format!(
         r#"

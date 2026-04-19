@@ -1,5 +1,17 @@
 //! Configuration for the `gcp_stackdriver_logs` sink.
 
+use std::collections::HashMap;
+
+use http::{Request, Uri};
+use hyper::Body;
+use snafu::Snafu;
+use vector_lib::lookup::lookup_v2::ConfigValuePath;
+use vrl::value::Kind;
+
+use super::{
+    encoder::StackdriverLogsEncoder, request_builder::StackdriverLogsRequestBuilder,
+    service::StackdriverLogsServiceRequestBuilder, sink::StackdriverLogsSink,
+};
 use crate::{
     gcp::{GcpAuthConfig, GcpAuthenticator, Scope},
     http::HttpClient,
@@ -8,22 +20,11 @@ use crate::{
         gcs_common::config::healthcheck_response,
         prelude::*,
         util::{
-            http::{http_response_retry_logic, HttpService},
-            service::TowerRequestConfigDefaults,
             BoxedRawValue, RealtimeSizeBasedDefaultBatchSettings,
+            http::{HttpService, http_response_retry_logic},
+            service::TowerRequestConfigDefaults,
         },
     },
-};
-use http::{Request, Uri};
-use hyper::Body;
-use snafu::Snafu;
-use std::collections::HashMap;
-use vector_lib::lookup::lookup_v2::ConfigValuePath;
-use vrl::value::Kind;
-
-use super::{
-    encoder::StackdriverLogsEncoder, request_builder::StackdriverLogsRequestBuilder,
-    service::StackdriverLogsServiceRequestBuilder, sink::StackdriverLogsSink,
 };
 
 #[derive(Debug, Snafu)]
@@ -161,8 +162,7 @@ pub(super) enum StackdriverLogName {
 
 /// Label Configuration.
 #[configurable_component]
-#[derive(Clone, Debug, Derivative)]
-#[derivative(Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct StackdriverLabelConfig {
     /// The value of this field is used to retrieve the associated labels from the `jsonPayload`
     /// and extract their values to set as LogEntry labels.

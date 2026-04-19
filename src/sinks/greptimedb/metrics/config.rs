@@ -1,24 +1,24 @@
+use vector_lib::{configurable::configurable_component, sensitive_string::SensitiveString};
+
 use crate::sinks::{
     greptimedb::{
-        default_dbname,
+        GreptimeDBDefaultBatchSettings, default_dbname,
         metrics::{
             request::GreptimeDBGrpcRetryLogic,
             request_builder::RequestBuilderOptions,
-            service::{healthcheck, GreptimeDBGrpcService},
+            service::{GreptimeDBGrpcService, healthcheck},
             sink,
         },
-        GreptimeDBDefaultBatchSettings,
     },
     prelude::*,
 };
-use vector_lib::{configurable::configurable_component, sensitive_string::SensitiveString};
 
 /// Configuration for the `greptimedb` sink.
 #[configurable_component(sink("greptimedb", "Ingest metrics data into GreptimeDB."))]
 #[configurable(metadata(
     deprecated = "The `greptimedb` sink has been renamed. Please use `greptimedb_metrics` instead."
 ))]
-#[derive(Clone, Debug, Derivative)]
+#[derive(Clone, Debug, Default)]
 pub struct GreptimeDBConfig(GreptimeDBMetricsConfig);
 
 impl GenerateConfig for GreptimeDBConfig {
@@ -31,7 +31,9 @@ impl GenerateConfig for GreptimeDBConfig {
 #[typetag::serde(name = "greptimedb")]
 impl SinkConfig for GreptimeDBConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        warn!("DEPRECATED: The `greptimedb` sink has been renamed. Please use `greptimedb_metrics` instead.");
+        warn!(
+            "DEPRECATED: The `greptimedb` sink has been renamed. Please use `greptimedb_metrics` instead."
+        );
         self.0.build(cx).await
     }
 

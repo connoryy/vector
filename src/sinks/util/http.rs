@@ -3,9 +3,10 @@ use aws_credential_types::provider::SharedCredentialsProvider;
 #[cfg(feature = "aws-core")]
 use aws_types::region::Region;
 use bytes::{Buf, Bytes};
-use futures::{future::BoxFuture, Sink};
+use futures::{Sink, future::BoxFuture};
 use headers::HeaderName;
-use http::{header, HeaderValue, Request, Response, StatusCode};
+use http::{HeaderValue, Request, Response, StatusCode, header};
+use http_body::Body as _;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderedHeaderName(HeaderName);
@@ -37,9 +38,6 @@ impl PartialOrd for OrderedHeaderName {
         Some(self.cmp(other))
     }
 }
-use hyper::{body, Body};
-use pin_project::pin_project;
-use snafu::{ResultExt, Snafu};
 use std::{
     collections::BTreeMap,
     fmt,
@@ -48,26 +46,29 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     time::Duration,
 };
+
+use hyper::Body;
+use pin_project::pin_project;
+use snafu::{ResultExt, Snafu};
 use tower::{Service, ServiceBuilder};
 use tower_http::decompression::DecompressionLayer;
 use vector_lib::{
-    configurable::configurable_component, stream::batcher::limiter::ItemBatchSize, ByteSizeOf,
-    EstimatedJsonEncodedSizeOf,
+    ByteSizeOf, EstimatedJsonEncodedSizeOf, configurable::configurable_component,
+    stream::batcher::limiter::ItemBatchSize,
 };
 
 use super::{
+    Batch, EncodedEvent, Partition, TowerBatchedSink, TowerPartitionSink, TowerRequestConfig,
+    TowerRequestSettings,
     retries::{RetryAction, RetryLogic},
     sink::{self, Response as _},
-    uri, Batch, EncodedEvent, Partition, TowerBatchedSink, TowerPartitionSink, TowerRequestConfig,
-    TowerRequestSettings,
+    uri,
 };
-
 #[cfg(feature = "aws-core")]
 use crate::aws::sign_request;
-
 use crate::{
     event::Event,
     http::{HttpClient, HttpError},
@@ -519,7 +520,7 @@ where
             }
 
             let (parts, body) = response.into_parts();
-            let mut body = body::aggregate(body).await?;
+            let mut body = body.collect().await?.aggregate();
             Ok(hyper::Response::from_parts(
                 parts,
                 body.copy_to_bytes(body.remaining()),
@@ -683,13 +684,6 @@ fn headers_examples() -> BTreeMap<String, String> {
 }
 
 impl RequestConfig {
-    pub fn add_old_option(&mut self, headers: Option<BTreeMap<String, String>>) {
-        if let Some(headers) = headers {
-            warn!("Option `headers` has been deprecated. Use `request.headers` instead.");
-            self.headers.extend(headers);
-        }
-    }
-
     pub fn split_headers(&self) -> (BTreeMap<String, String>, BTreeMap<String, Template>) {
         let mut static_headers = BTreeMap::new();
         let mut template_headers = BTreeMap::new();
@@ -942,14 +936,14 @@ where
 mod test {
     #![allow(clippy::print_stderr)] //tests
 
-    use futures::{future::ready, StreamExt};
+    use futures::{StreamExt, future::ready};
     use hyper::{
-        service::{make_service_fn, service_fn},
         Response, Server, Uri,
+        service::{make_service_fn, service_fn},
     };
 
     use super::*;
-    use crate::{config::ProxyConfig, test_util::next_addr};
+    use crate::{config::ProxyConfig, test_util::addr::next_addr};
 
     #[test]
     fn util_http_retry_logic() {
@@ -963,17 +957,21 @@ mod test {
         assert!(logic.should_retry_response(&response_429).is_retryable());
         assert!(logic.should_retry_response(&response_500).is_retryable());
         assert!(logic.should_retry_response(&response_408).is_retryable());
-        assert!(logic
-            .should_retry_response(&response_400)
-            .is_not_retryable());
-        assert!(logic
-            .should_retry_response(&response_501)
-            .is_not_retryable());
+        assert!(
+            logic
+                .should_retry_response(&response_400)
+                .is_not_retryable()
+        );
+        assert!(
+            logic
+                .should_retry_response(&response_501)
+                .is_not_retryable()
+        );
     }
 
     #[tokio::test]
     async fn util_http_it_makes_http_requests() {
-        let addr = next_addr();
+        let (_guard, addr) = next_addr();
 
         let uri = format!("http://{}:{}/", addr.ip(), addr.port())
             .parse::<Uri>()
@@ -993,13 +991,14 @@ mod test {
         let new_service = make_service_fn(move |_| {
             let tx = tx.clone();
 
-            let svc = service_fn(move |req| {
+            let svc = service_fn(move |req: http::Request<Body>| {
                 let mut tx = tx.clone();
 
                 async move {
-                    let mut body = hyper::body::aggregate(req.into_body())
+                    let mut body = http_body::Body::collect(req.into_body())
                         .await
-                        .map_err(|error| format!("error: {error}"))?;
+                        .map_err(|error| format!("error: {error}"))?
+                        .aggregate();
                     let string = String::from_utf8(body.copy_to_bytes(body.remaining()).to_vec())
                         .map_err(|_| "Wasn't UTF-8".to_string())?;
                     tx.try_send(string).map_err(|_| "Send error".to_string())?;

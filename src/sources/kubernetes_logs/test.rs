@@ -684,7 +684,7 @@ mod tests {
             } else if request_uri.starts_with("/api/v1/nodes") {
                 node_count = handle_node(request_uri, send, node_count);
             } else {
-                panic!("Got unexpected uri in request: {:?}", request_uri);
+                panic!("Got unexpected uri in request: {request_uri:?}");
             }
         }
     }

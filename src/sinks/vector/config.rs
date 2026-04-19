@@ -7,9 +7,9 @@ use tower::ServiceBuilder;
 use vector_lib::configurable::configurable_component;
 
 use super::{
+    VectorSinkError,
     service::{VectorRequest, VectorResponse, VectorService},
     sink::VectorSink,
-    VectorSinkError,
 };
 use crate::{
     config::{
@@ -19,11 +19,11 @@ use crate::{
     http::build_proxy_connector,
     proto::vector as proto,
     sinks::{
-        util::{
-            retries::RetryLogic, BatchConfig, RealtimeEventBasedDefaultBatchSettings,
-            ServiceBuilderExt, TowerRequestConfig,
-        },
         Healthcheck, VectorSink as VectorSinkType,
+        util::{
+            BatchConfig, RealtimeEventBasedDefaultBatchSettings, ServiceBuilderExt,
+            TowerRequestConfig, retries::RetryLogic,
+        },
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
@@ -159,6 +159,10 @@ async fn healthcheck(
         return Ok(());
     }
 
+    // Use the custom Vector health check
+    // Note: Both custom and standard health checks behave identically - they just
+    // return serving status without actual health validation. The Vector source
+    // implements both protocols now for compatibility.
     let request = service.client.health_check(proto::HealthCheckRequest {});
     match request.await {
         Ok(response) => match proto::ServingStatus::try_from(response.into_inner().status) {

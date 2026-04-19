@@ -10,16 +10,16 @@ set -x
 #
 # ENV VARS
 #
-#   $TARGET         a target triple. ex: x86_64-apple-darwin (no default)
+#   $TARGET         a target triple. ex: arm64-apple-darwin (no default)
 
-TARGET="${TARGET:?"You must specify a target triple, ex: x86_64-apple-darwin"}"
+TARGET="${TARGET:?"You must specify a target triple, ex: arm64-apple-darwin"}"
 
 #
 # Local vars
 #
 
 PROJECT_ROOT="$(pwd)"
-PACKAGE_VERSION="${VECTOR_VERSION:-"$(cargo vdev version)"}"
+PACKAGE_VERSION="${VECTOR_VERSION:-"$(${VDEV:-cargo vdev} version)"}"
 ARCHIVE_NAME="vector-${PACKAGE_VERSION}-$TARGET.tar.gz"
 ARCHIVE_PATH="target/artifacts/$ARCHIVE_NAME"
 ABSOLUTE_ARCHIVE_PATH="$PROJECT_ROOT/$ARCHIVE_PATH"
