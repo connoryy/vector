@@ -6,6 +6,7 @@ on:
       - 'ack-v*'
     branches:
       - 'connor/k8s-logs-acks-v049'
+      - 'connor/baseline-ack-support-with-strip-finalizers-optimization'
   workflow_dispatch:
 
 jobs:
@@ -83,7 +84,7 @@ jobs:
           name: "Vector with k8s-logs ack support (${{ steps.sha.outputs.sha }})"
           body: |
             Pre-built Vector binary with kubernetes_logs acknowledgement support.
-            Branch: connor/k8s-logs-acks-merge2
+            Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
           files: |
             artifacts/vector-amd64
