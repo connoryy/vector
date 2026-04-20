@@ -1050,9 +1050,6 @@ mod tests {
                             expire_metrics_secs: Default::default(),
                             expire_metrics_per_metric_set: Default::default(),
                             wildcard_matching: Default::default(),
-                            buffer_utilization_ewma_half_life_seconds: Default::default(),
-                            latency_ewma_alpha: Default::default(),
-                            metrics_storage_refresh_period: Default::default(),
                         },
                         shutdown,
                         out: tx,
@@ -1062,7 +1059,6 @@ mod tests {
                         schema: Default::default(),
                         extra_context: ExtraContext::single_value(logs_dir.to_owned()),
                         enrichment_tables: Default::default(),
-                        metrics_storage: Default::default(),
                     },
                     client,
                 )
