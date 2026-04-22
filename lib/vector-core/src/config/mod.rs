@@ -340,6 +340,7 @@ impl From<SourceAcknowledgementsConfig> for AcknowledgementsConfig {
     fn from(config: SourceAcknowledgementsConfig) -> Self {
         Self {
             enabled: config.enabled,
+            authoritative: None,
         }
     }
 }
@@ -365,25 +366,62 @@ pub struct AcknowledgementsConfig {
     ///
     /// [global_acks]: https://vector.dev/docs/reference/configuration/global-options/#acknowledgements
     enabled: Option<bool>,
+
+    /// Whether this sink is considered "authoritative" for event acknowledgement purposes.
+    ///
+    /// In a fan-out topology where events are sent to multiple sinks, sources that support
+    /// end-to-end acknowledgements normally wait for **all** connected sinks to process events
+    /// before acknowledging them. This can cause problems when non-critical sinks (such as
+    /// best-effort observability outputs) are slow or unavailable, blocking acknowledgement
+    /// for critical sinks that have already successfully processed the events.
+    ///
+    /// Setting `authoritative` to `false` on a sink causes the source to **not wait** for that
+    /// sink before acknowledging events. This decouples non-critical sinks from the
+    /// acknowledgement chain, allowing sources to acknowledge events as soon as all
+    /// "authoritative" sinks have finished processing.
+    ///
+    /// Defaults to `true`, which preserves the existing behavior where all sinks participate
+    /// in the acknowledgement chain regardless of their `enabled` setting.
+    #[serde(default)]
+    authoritative: Option<bool>,
 }
 
 impl AcknowledgementsConfig {
-    pub const DEFAULT: Self = Self { enabled: None };
+    pub const DEFAULT: Self = Self {
+        enabled: None,
+        authoritative: None,
+    };
 
     #[must_use]
     pub fn merge_default(&self, other: &Self) -> Self {
         let enabled = self.enabled.or(other.enabled);
-        Self { enabled }
+        let authoritative = self.authoritative.or(other.authoritative);
+        Self {
+            enabled,
+            authoritative,
+        }
     }
 
     pub fn enabled(&self) -> bool {
         self.enabled.unwrap_or(false)
     }
+
+    /// Returns whether this sink is authoritative for acknowledgement purposes.
+    ///
+    /// When `false`, event finalizers are stripped from events entering this sink,
+    /// allowing the source's `BatchNotifier` to resolve without waiting for this sink.
+    /// Defaults to `true` to preserve backwards compatibility.
+    pub fn authoritative(&self) -> bool {
+        self.authoritative.unwrap_or(true)
+    }
 }
 
 impl From<Option<bool>> for AcknowledgementsConfig {
     fn from(enabled: Option<bool>) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            authoritative: None,
+        }
     }
 }
 
