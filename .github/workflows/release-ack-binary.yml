@@ -7,6 +7,7 @@ on:
     branches:
       - 'connor/k8s-logs-acks-v049'
       - 'connor/baseline-ack-support-with-strip-finalizers-optimization'
+      - 'connor/authoritative-sink-acks'
   workflow_dispatch:
 
 jobs:
