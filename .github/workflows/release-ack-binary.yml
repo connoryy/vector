@@ -1,0 +1,94 @@
+name: Build and release ack binary
+
+on:
+  push:
+    tags:
+      - 'ack-v*'
+    branches:
+      - 'connor/k8s-logs-acks-v049'
+      - 'connor/baseline-ack-support-with-strip-finalizers-optimization'
+      - 'connor/authoritative-sink-acks'
+      - 'connor/acks-v055'
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ack-binary-${{ matrix.target }}
+
+      - name: Bootstrap environment
+        run: sudo -E bash scripts/environment/bootstrap-ubuntu-24.04.sh
+
+      - name: Install protoc
+        run: sudo bash scripts/environment/install-protoc.sh
+
+      - name: Build release binary
+        run: cargo build --release --locked --no-default-features --features default
+
+      - name: Strip binary
+        run: strip target/release/vector
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ matrix.arch }}
+          path: target/release/vector
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download amd64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-amd64
+          path: artifacts/amd64/
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-arm64
+          path: artifacts/arm64/
+
+      - name: Rename with arch suffix
+        run: |
+          mv artifacts/amd64/vector artifacts/vector-amd64
+          mv artifacts/arm64/vector artifacts/vector-arm64
+
+      - name: Get commit SHA
+        id: sha
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ack-${{ steps.sha.outputs.sha }}
+          name: "Vector with k8s-logs ack support (${{ steps.sha.outputs.sha }})"
+          body: |
+            Pre-built Vector binary with kubernetes_logs acknowledgement support.
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+          files: |
+            artifacts/vector-amd64
+            artifacts/vector-arm64
+          make_latest: true
