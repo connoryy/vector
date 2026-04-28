@@ -23,9 +23,11 @@ jobs:
         include:
           - runs-on: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            target-feature: target-x86_64-unknown-linux-musl
             artifact: vector-component-probes-linux-x86_64.tar.gz
           - runs-on: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            target-feature: target-aarch64-unknown-linux-musl
             artifact: vector-component-probes-linux-arm64.tar.gz
     runs-on: ${{ matrix.runs-on }}
     steps:
@@ -66,13 +68,10 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build component-probes binary
-        run: cargo build --release --features component-probes --target ${{ matrix.target }}
+        run: cargo build --release --no-default-features --features "${{ matrix.target-feature }},component-probes,vendored" --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
-          # Build sasl2 from source — the system libsasl2-dev is glibc-linked
-          # and pkg-config can't find it when targeting musl.
-          SASL2_STATIC: "1"
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
