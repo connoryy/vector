@@ -1523,8 +1523,10 @@ mod authoritative_tests {
 
     #[test]
     fn returns_none_for_empty_config() {
-        let mut config = ConfigBuilder::default();
-        config.allow_empty = true;
+        let config = ConfigBuilder {
+            allow_empty: true,
+            ..Default::default()
+        };
         let config = config.build().unwrap();
         assert!(
             config.compute_authoritative_components().is_none(),
