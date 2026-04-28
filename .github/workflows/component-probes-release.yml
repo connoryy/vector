@@ -67,15 +67,11 @@ jobs:
           if [ -d /usr/include/sasl ]; then
             sudo ln -sf /usr/include/sasl "$MUSL_INCLUDE/sasl"
           fi
-          # musl-tools only provides musl-gcc, not musl-g++. librdkafka's cmake
-          # build needs a C++ compiler. Create a musl-g++ wrapper that calls g++
-          # with the musl spec file.
-          SPEC_FILE="/usr/lib/${ARCH}-linux-musl/musl-gcc.specs"
-          cat <<WRAPPER | sudo tee /usr/local/bin/musl-g++ > /dev/null
-          #!/bin/sh
-          exec g++ "\$@" -specs "$SPEC_FILE" -nostdinc -isystem "$MUSL_INCLUDE" -isystem /include
-          WRAPPER
-          sudo chmod +x /usr/local/bin/musl-g++
+          # musl-tools only provides musl-gcc, not musl-g++. The cmake-rs crate
+          # sets CMAKE_CXX_COMPILER=musl-g++ for musl targets. librdkafka's C++
+          # code just compiles to .o files — actual musl-aware linking is done by
+          # the Rust toolchain. A plain g++ symlink is sufficient.
+          sudo ln -sf /usr/bin/g++ /usr/local/bin/musl-g++
 
       - name: Add musl Rust target
         run: rustup target add ${{ matrix.target }}
