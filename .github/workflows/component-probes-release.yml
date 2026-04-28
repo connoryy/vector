@@ -47,14 +47,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools linux-libc-dev
-          # musl-gcc uses its own sysroot and doesn't see /usr/include/linux/.
-          # Symlink kernel headers into musl's include path so openssl-sys can
-          # find linux/version.h during compilation.
-          MUSL_INCLUDE="$(find /usr/lib -path '*/musl/include' -type d 2>/dev/null | head -1)"
-          if [ -n "$MUSL_INCLUDE" ] && [ ! -e "$MUSL_INCLUDE/linux" ]; then
-            sudo ln -s /usr/include/linux "$MUSL_INCLUDE/linux"
-            sudo ln -s /usr/include/asm "$MUSL_INCLUDE/asm"
-            sudo ln -s /usr/include/asm-generic "$MUSL_INCLUDE/asm-generic"
+          # musl-gcc wrapper uses a spec file that restricts its include search
+          # path to the musl sysroot, so it can't find linux/version.h from
+          # linux-libc-dev. Patch the spec file to add /usr/include as a system
+          # include directory, which is where linux-libc-dev installs headers.
+          SPEC_FILE="$(musl-gcc -dumpspecs 2>/dev/null | head -1 || true)"
+          if [ -z "$SPEC_FILE" ]; then
+            # Find it manually
+            SPEC_FILE="$(find /usr/lib -name 'musl-gcc.specs' 2>/dev/null | head -1)"
+          fi
+          if [ -n "$SPEC_FILE" ] && [ -f "$SPEC_FILE" ]; then
+            sudo sed -i 's|-isystem |-isystem /usr/include -isystem |' "$SPEC_FILE"
           fi
 
       - name: Add musl Rust target
@@ -65,7 +68,8 @@ jobs:
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
-          C_INCLUDE_PATH: /usr/include
+          # Ensure C compilers invoked by build scripts can find kernel headers.
+          CFLAGS: "-I/usr/include"
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
