@@ -22,10 +22,10 @@ jobs:
       matrix:
         include:
           - runs-on: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact: vector-component-probes-linux-x86_64.tar.gz
           - runs-on: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             artifact: vector-component-probes-linux-arm64.tar.gz
     runs-on: ${{ matrix.runs-on }}
     steps:
@@ -35,7 +35,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Scope cache to this workflow so it doesn't collide with other builds
           key: component-probes-${{ matrix.target }}
 
       - name: Bootstrap environment
@@ -44,14 +43,22 @@ jobs:
       - name: Install protoc
         run: sudo bash scripts/environment/install-protoc.sh
 
+      - name: Install musl toolchain and kernel headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools linux-libc-dev
+
+      - name: Add musl Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build component-probes binary
-        run: cargo build --release --features component-probes
+        run: cargo build --release --features component-probes --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
 
       - name: Package binary
-        run: tar -czf ${{ matrix.artifact }} -C target/release vector
+        run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
