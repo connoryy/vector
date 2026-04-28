@@ -47,6 +47,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools linux-libc-dev
+          # musl-gcc uses its own sysroot and doesn't see /usr/include/linux/.
+          # Symlink kernel headers into musl's include path so openssl-sys can
+          # find linux/version.h during compilation.
+          MUSL_INCLUDE="$(find /usr/lib -path '*/musl/include' -type d 2>/dev/null | head -1)"
+          if [ -n "$MUSL_INCLUDE" ] && [ ! -e "$MUSL_INCLUDE/linux" ]; then
+            sudo ln -s /usr/include/linux "$MUSL_INCLUDE/linux"
+            sudo ln -s /usr/include/asm "$MUSL_INCLUDE/asm"
+            sudo ln -s /usr/include/asm-generic "$MUSL_INCLUDE/asm-generic"
+          fi
 
       - name: Add musl Rust target
         run: rustup target add ${{ matrix.target }}
@@ -56,6 +65,7 @@ jobs:
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
+          C_INCLUDE_PATH: /usr/include
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
