@@ -48,7 +48,7 @@ jobs:
       - name: Install musl toolchain and kernel headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools linux-libc-dev
+          sudo apt-get install -y musl-tools linux-libc-dev libsasl2-dev
           # musl-gcc uses a spec file with -nostdinc that restricts includes to
           # the musl sysroot (/usr/include/<arch>-linux-musl). Kernel headers
           # from linux-libc-dev live in /usr/include/linux/ (the glibc path).
@@ -63,6 +63,19 @@ jobs:
           elif [ -d /usr/include/asm ]; then
             sudo ln -sf /usr/include/asm "$MUSL_INCLUDE/asm"
           fi
+          # sasl2 headers live in /usr/include/sasl/ - symlink for musl visibility
+          if [ -d /usr/include/sasl ]; then
+            sudo ln -sf /usr/include/sasl "$MUSL_INCLUDE/sasl"
+          fi
+          # musl-tools only provides musl-gcc, not musl-g++. librdkafka's cmake
+          # build needs a C++ compiler. Create a musl-g++ wrapper that calls g++
+          # with the musl spec file.
+          SPEC_FILE="/usr/lib/${ARCH}-linux-musl/musl-gcc.specs"
+          cat <<WRAPPER | sudo tee /usr/local/bin/musl-g++ > /dev/null
+          #!/bin/sh
+          exec g++ "\$@" -specs "$SPEC_FILE" -nostdinc -isystem "$MUSL_INCLUDE" -isystem /include
+          WRAPPER
+          sudo chmod +x /usr/local/bin/musl-g++
 
       - name: Add musl Rust target
         run: rustup target add ${{ matrix.target }}
@@ -72,6 +85,7 @@ jobs:
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
+          PKG_CONFIG_ALLOW_CROSS: "1"
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
