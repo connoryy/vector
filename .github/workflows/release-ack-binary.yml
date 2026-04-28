@@ -39,7 +39,7 @@ jobs:
         run: sudo bash scripts/environment/install-protoc.sh
 
       - name: Build release binary
-        run: cargo build --release --locked --no-default-features --features default
+        run: cargo build --release --locked --no-default-features --features default,vendored
 
       - name: Strip binary
         run: strip target/release/vector
