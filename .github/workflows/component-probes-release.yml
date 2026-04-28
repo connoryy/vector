@@ -70,6 +70,9 @@ jobs:
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
+          # Build sasl2 from source — the system libsasl2-dev is glibc-linked
+          # and pkg-config can't find it when targeting musl.
+          SASL2_STATIC: "1"
 
       - name: Package binary
         run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
