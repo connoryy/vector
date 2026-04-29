@@ -19,14 +19,19 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runs-on: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
+            target-feature: target-x86_64-unknown-linux-musl
             artifact: vector-component-probes-linux-x86_64.tar.gz
-          - runs-on: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact: vector-component-probes-linux-arm64.tar.gz
+          # ARM musl build disabled: jemalloc C11 atomics fail under musl on aarch64.
+          # TODO: fix jemalloc build or use tikv-jemalloc-sys vendored feature.
+          # - runs-on: ubuntu-24.04-arm
+          #   target: aarch64-unknown-linux-musl
+          #   target-feature: target-aarch64-unknown-linux-musl
+          #   artifact: vector-component-probes-linux-arm64.tar.gz
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +40,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Scope cache to this workflow so it doesn't collide with other builds
           key: component-probes-${{ matrix.target }}
 
       - name: Bootstrap environment
@@ -44,14 +48,46 @@ jobs:
       - name: Install protoc
         run: sudo bash scripts/environment/install-protoc.sh
 
+      - name: Install musl toolchain and kernel headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools linux-libc-dev libsasl2-dev
+          # musl-gcc uses a spec file with -nostdinc that restricts includes to
+          # the musl sysroot (/usr/include/<arch>-linux-musl). Kernel headers
+          # from linux-libc-dev live in /usr/include/linux/ (the glibc path).
+          # Symlink them into the musl include directory so musl-gcc finds them.
+          ARCH="$(uname -m)"
+          MUSL_INCLUDE="/usr/include/${ARCH}-linux-musl"
+          sudo mkdir -p "$MUSL_INCLUDE"
+          sudo ln -sf /usr/include/linux "$MUSL_INCLUDE/linux"
+          sudo ln -sf /usr/include/asm-generic "$MUSL_INCLUDE/asm-generic"
+          if [ -d "/usr/include/${ARCH}-linux-gnu/asm" ]; then
+            sudo ln -sf "/usr/include/${ARCH}-linux-gnu/asm" "$MUSL_INCLUDE/asm"
+          elif [ -d /usr/include/asm ]; then
+            sudo ln -sf /usr/include/asm "$MUSL_INCLUDE/asm"
+          fi
+          # sasl2 headers live in /usr/include/sasl/ - symlink for musl visibility
+          if [ -d /usr/include/sasl ]; then
+            sudo ln -sf /usr/include/sasl "$MUSL_INCLUDE/sasl"
+          fi
+          # musl-tools only provides musl-gcc, not musl-g++. The cmake-rs crate
+          # sets CMAKE_CXX_COMPILER=musl-g++ for musl targets. librdkafka's C++
+          # code just compiles to .o files — actual musl-aware linking is done by
+          # the Rust toolchain. A plain g++ symlink is sufficient.
+          sudo ln -sf /usr/bin/g++ /usr/local/bin/musl-g++
+
+      - name: Add musl Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build component-probes binary
-        run: cargo build --release --features component-probes
+        run: cargo build --release --no-default-features --features "${{ matrix.target-feature }},component-probes,vendored" --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes"
           CARGO_PROFILE_RELEASE_DEBUG: "true"
+          PKG_CONFIG_ALLOW_CROSS: "1"
 
       - name: Package binary
-        run: tar -czf ${{ matrix.artifact }} -C target/release vector
+        run: tar -czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release vector
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
